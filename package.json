@@ -1,0 +1,30 @@
+{
+  "name": "drawing-unit-converter",
+  "version": "0.1.0",
+  "description": "Browser tool that imports engineering drawings (PDF, DXF, DWG), converts dimension units on click, and exports DXF or PDF.",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/copy-assets.mjs",
+    "dev": "vite",
+    "prebuild": "node scripts/copy-assets.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "samples": "python3 scripts/make_samples.py"
+  },
+  "dependencies": {
+    "@mlightcad/libredwg-web": "^0.8.2",
+    "dxf-parser": "^1.1.2",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^6.4.299"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}

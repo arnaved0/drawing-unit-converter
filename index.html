@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Open a PDF, DXF or DWG engineering drawing, click dimensions to convert their units, and download the result as DXF or PDF." />
+    <title>Drawing Unit Converter</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 22h24M4 18v8M28 18v8' stroke='%231f6bad' stroke-width='2.5' fill='none'/%3E%3Cpath d='M4 22l5-3v6zM28 22l-5-3v6z' fill='%231f6bad'/%3E%3Ctext x='16' y='14' font-size='11' text-anchor='middle' font-family='Arial' fill='%23222'%3E25.4%3C/text%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 22h24M4 18v8M28 18v8" stroke="currentColor" stroke-width="2.5" fill="none" /><path d="M4 22l5-3v6zM28 22l-5-3v6z" fill="currentColor" /></svg>
+        <span>Drawing Unit Converter</span>
+      </div>
+      <label class="btn primary" for="file-input">Open drawing…</label>
+      <input id="file-input" type="file" accept=".pdf,.dxf,.dwg,application/pdf" hidden />
+      <span id="file-name" class="file-name"></span>
+      <select id="page-select" hidden aria-label="PDF page"></select>
+      <div class="spacer"></div>
+      <div class="export" role="group" aria-label="Download">
+        <span class="export-label">Download</span>
+        <button id="export-dxf" class="btn" disabled title="DXF">DXF</button>
+        <button id="export-dxf12" class="btn" disabled title="Simplified DXF R12: opens in any CAD program">DXF R12</button>
+        <button id="export-pdf" class="btn" disabled>PDF</button>
+        <button id="export-dwg" class="btn" disabled title="DWG export needs a conversion server, which is planned. For now, download DXF and save it as DWG in your CAD program.">DWG <small>(soon)</small></button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section id="viewer" class="viewer" aria-label="Drawing preview">
+        <div id="empty" class="empty">
+          <div class="empty-card">
+            <h1>Open an engineering drawing</h1>
+            <p>Drop a <b>PDF</b>, <b>DXF</b> or <b>DWG</b> file here, or use <b>Open drawing…</b></p>
+            <p>Then click any highlighted dimension to convert it to the unit chosen on the right.</p>
+            <p class="muted">Files are processed in your browser and are never uploaded.</p>
+          </div>
+        </div>
+        <svg id="svg" class="canvas" xmlns="http://www.w3.org/2000/svg" hidden>
+          <g id="world" transform="scale(1,-1)">
+            <g id="geom"></g>
+            <g id="dimtexts"></g>
+            <g id="overlays"></g>
+          </g>
+        </svg>
+        <div class="zoom" id="zoom-controls" hidden>
+          <button class="btn icon" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+          <button class="btn icon" id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+          <button class="btn icon" id="zoom-fit" title="Fit drawing" aria-label="Fit drawing"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
+        </div>
+        <div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text">Reading drawing…</span></div>
+        <div id="toast" class="toast" hidden></div>
+      </section>
+
+      <aside class="panel" aria-label="Conversion settings">
+        <section>
+          <h2>Convert to</h2>
+          <label class="field">
+            <span>Unit</span>
+            <select id="target"></select>
+          </label>
+          <label class="field" id="decimals-field">
+            <span>Decimal places</span>
+            <select id="decimals">
+              <option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+            </select>
+          </label>
+          <label class="field" id="denominator-field" hidden>
+            <span>Round to</span>
+            <select id="denominator">
+              <option value="2">1/2"</option><option value="4">1/4"</option><option value="8">1/8"</option><option value="16">1/16"</option><option value="32">1/32"</option><option value="64">1/64"</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="show-unit" /> Add unit label</label>
+          <label class="field" id="inch-field">
+            <span>Inch label</span>
+            <select id="inch-label"><option value="in">in</option><option value="&quot;">"</option></select>
+          </label>
+          <label class="check"><input type="checkbox" id="trim-zeros" /> Drop trailing zeros</label>
+          <p class="example" id="example"></p>
+        </section>
+
+        <section>
+          <h2>Drawing units</h2>
+          <label class="field">
+            <span>Values without a unit are in</span>
+            <select id="source-unit">
+              <option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option><option value="in">in</option><option value="ft">ft</option>
+            </select>
+          </label>
+          <p class="hint" id="source-hint"></p>
+        </section>
+
+        <section>
+          <div class="row">
+            <button id="convert-all" class="btn primary" disabled>Convert all</button>
+            <button id="reset-all" class="btn" disabled>Reset all</button>
+          </div>
+          <label class="check"><input type="checkbox" id="highlight" checked /> Highlight dimensions</label>
+        </section>
+
+        <section class="grow">
+          <h2>Dimensions <span id="dim-count" class="count"></span></h2>
+          <p class="hint" id="dim-hint">Open a drawing to list its dimensions.</p>
+          <ul id="dim-list" class="dim-list"></ul>
+        </section>
+
+        <section>
+          <details id="report">
+            <summary>What was found in the file</summary>
+            <dl id="stats" class="stats"></dl>
+            <ul id="warnings" class="warnings"></ul>
+          </details>
+        </section>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
