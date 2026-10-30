@@ -96,6 +96,27 @@ details summary { cursor: pointer; font-size: 14px; }
 @keyframes flash { 0%, 100% { fill: var(--accent-soft); } 50% { fill: rgba(255, 170, 0, 0.6); } }
 text.t { pointer-events: none; }
 #dimtexts text.converted { font-weight: 600; }
+#dimtexts polygon.mask { fill: #fff; stroke: none; }
+#selection { fill: rgba(31, 107, 173, 0.12); stroke: var(--accent); stroke-width: calc(var(--hair) * 1.5); stroke-dasharray: calc(var(--hair) * 6) calc(var(--hair) * 4); }
+.canvas.picking { cursor: crosshair; }
+#read-area.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* scanned drawings: show the scan, the traced drawing, or both */
+svg.mode-scan .traced, svg.mode-scan #dimtexts text.ocr { display: none; }
+svg.mode-traced .underlay, svg.mode-traced #dimtexts polygon.mask, svg.mode-traced #dimtexts text.onscan { display: none; }
+svg.mode-both .underlay { opacity: 0.35; }
+svg.mode-both #dimtexts polygon.mask, svg.mode-both #dimtexts text.onscan { display: none; }
+
+.progress { width: min(420px, 70%); height: 6px; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent); width: 0; transition: width 0.2s; }
+.busy { flex-direction: column; }
+.busy .row-inline { display: flex; align-items: center; gap: 12px; }
+.view-mode { display: flex; gap: 0; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.view-mode button { border: none; border-radius: 0; background: #fff; padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+.view-mode button.on { background: var(--accent); color: #fff; }
+.dim-list .flag { color: #b26a00; font-weight: 700; }
+.dim-list .edit { margin-left: 4px; border: none; background: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 0 2px; }
+.dim-list .edit:hover { color: var(--accent); }
 
 @media (max-width: 820px) {
   .layout { flex-direction: column; }

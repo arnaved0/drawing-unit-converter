@@ -244,7 +244,8 @@ def sample_arc_element():
     label(c, 960, 440, "C-Z", color=BLUE)
     label(c, 955, 428, "86.0\u00b0", color=BLUE)
     label(c, 1030, 400, "C-Z", color=BLUE, size=7, rot=-35)
-    label(c, 1035, 390, "11.2 mm", color=BLUE, size=7, rot=-35)
+    # second line one line-height below the first, perpendicular to the -35° baseline
+    label(c, 1030 - 5.2, 400 - 7.4, "11.2 mm", color=BLUE, size=7, rot=-35)
     label(c, 610, 420, "C-L", color=BLUE)
     label(c, 610, 408, "R 330.2mm", color=BLUE)
     label(c, 960, 330, "C-Z", color=BLUE)
