@@ -18,12 +18,10 @@
   "dependencies": {
     "@mlightcad/libredwg-web": "^0.8.2",
     "dxf-parser": "^1.1.2",
-    "onnxruntime-web": "^1.31.1",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.4.299"
   },
   "devDependencies": {
-    "@napi-rs/canvas": "^1.1.0",
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.5",

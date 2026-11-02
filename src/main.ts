@@ -1,17 +1,15 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { convertDimension, detectDimensions, findLengthTokens, type Dimension } from './dimensions';
+import { convertDimension, detectDimensions, type Dimension } from './dimensions';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
 import { exportPdfOverlay, exportPdfPlot } from './export/pdf';
 import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs } from './importers/pdf';
-import { countEntities, emptyStats, newId, type Drawing, type Entity, type LengthUnit, type TextEntity } from './model';
+import type { Drawing, LengthUnit, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
-import type { ScanRequest, ScanResponse } from './scan/worker';
-import { scanResolution } from './scan/resolution';
 import { DEFAULT_SETTINGS, formatLength, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -66,11 +64,9 @@ function toast(msg: string, error = false, ms = 5000): void {
   toastTimer = window.setTimeout(() => (t.hidden = true), ms);
 }
 
-function busy(text: string | null, fraction?: number): void {
+function busy(text: string | null): void {
   $('busy').hidden = text === null;
   if (text) $('busy-text').textContent = text;
-  $('busy-progress').hidden = fraction === undefined || text === null;
-  if (fraction !== undefined) $('busy-bar').style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
 }
 
 function download(data: Uint8Array | string, name: string, type: string): void {
@@ -140,7 +136,6 @@ async function openFile(file: File, pageIndex = 0): Promise<void> {
     if (ext === 'pdf') d = await importPdf(pdfjs as unknown as PdfJs, bytes, file.name, { pageIndex, encodeImage, docParams: PDF_PARAMS });
     else if (ext === 'dxf') d = importDxf(bytes, file.name);
     else d = await importDwg(bytes, file.name);
-    if (d.scan) await processScanned(d);
     state.drawing = d;
     state.file = file;
     state.dims = detectDimensions(d);
@@ -153,180 +148,6 @@ async function openFile(file: File, pageIndex = 0): Promise<void> {
   } finally {
     busy(null);
   }
-}
-
-// ------------------------------------------------------------------ scanned pages
-
-let scanWorker: Worker | null = null;
-function getScanWorker(): Worker {
-  scanWorker ??= new Worker(new URL('./scan/worker.ts', import.meta.url), { type: 'module' });
-  return scanWorker;
-}
-
-const PT_TO_MM = 25.4 / 72;
-
-/** Renders the scanned page, then reads its text and traces its lines in a worker. */
-async function processScanned(d: Drawing): Promise<void> {
-  const pdf = d.pdf!;
-  busy('Preparing the scanned page…', 0);
-  const wMm = pdf.widthPt * PT_TO_MM;
-  const hMm = pdf.heightPt * PT_TO_MM;
-  const pxPerMm = scanResolution(pdf.imagePx, wMm, hMm);
-  const task = pdfjs.getDocument({ data: pdf.bytes.slice(), ...PDF_PARAMS });
-  const doc = await task.promise;
-  const page = await doc.getPage(pdf.pageIndex + 1);
-  const vp = page.getViewport({ scale: (pxPerMm * 25.4) / 72 });
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(vp.width);
-  canvas.height = Math.round(vp.height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  await page.render({ canvasContext: ctx, viewport: vp, canvas } as never).promise;
-  await task.destroy();
-  const exact = canvas.width / wMm;
-  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const href = canvas.toDataURL('image/jpeg', 0.85);
-
-  const result = await new Promise<Extract<ScanResponse, { type: 'done' }>['result']>((resolve, reject) => {
-    const w = getScanWorker();
-    w.onmessage = (ev: MessageEvent<ScanResponse>) => {
-      const m = ev.data;
-      if (m.type === 'progress') busy(`Scanned drawing: ${m.label}…`, m.fraction);
-      else if (m.type === 'done') resolve(m.result);
-      else if (m.type === 'error') reject(new Error(m.message));
-    };
-    w.onerror = (ev) => reject(new Error(ev.message || 'The scan worker failed to start.'));
-    const req: ScanRequest = { type: 'process', base: BASE, width: pixels.width, height: pixels.height, data: pixels.data, pxPerMm: exact, pageHeightMm: canvas.height / exact };
-    w.postMessage(req, [pixels.data.buffer]);
-  });
-
-  const underlay: Entity = {
-    kind: 'image',
-    id: newId('img'),
-    style: { layer: 'SCAN', color: '#808080' },
-    href,
-    p00: { x: 0, y: 0 },
-    p10: { x: wMm, y: 0 },
-    p01: { x: 0, y: hMm },
-    pxW: canvas.width,
-    pxH: canvas.height,
-  };
-  d.entities = [underlay, ...result.entities];
-  d.blocks = {};
-  d.bounds = { minX: 0, minY: 0, maxX: wMm, maxY: hMm };
-  d.detectedDimensionUnit = result.detectedUnit;
-  d.scan = { href, pxPerMm: exact, processed: true, ocrLines: result.ocrLines, traced: result.traced, skewDeg: result.skewDeg };
-  const stats = emptyStats();
-  countEntities(result.entities, stats);
-  d.stats = stats;
-  d.warnings = d.warnings.filter((w) => !/Images were found/.test(w));
-  d.warnings.unshift(
-    `Scanned page: ${result.ocrLines} text lines were read and ${result.traced} lines, arcs, circles and arrowheads were traced. ` +
-      'Text recognition can misread characters: check values marked "?" and use the pencil button in the list to correct them before converting.',
-  );
-  if (Math.abs(result.skewDeg) > 0.2) d.warnings.push(`The scan is tilted by about ${result.skewDeg.toFixed(1)}°; traced lines keep that tilt.`);
-}
-
-let viewMode: 'scan' | 'traced' | 'both' = 'scan';
-function setViewMode(mode: typeof viewMode): void {
-  viewMode = mode;
-  svg.classList.remove('mode-scan', 'mode-traced', 'mode-both');
-  if (state.drawing?.scan) svg.classList.add(`mode-${mode}`);
-  for (const b of document.querySelectorAll<HTMLButtonElement>('#view-mode button')) b.classList.toggle('on', b.dataset.mode === mode);
-}
-$('view-mode').addEventListener('click', (ev) => {
-  const b = (ev.target as HTMLElement).closest('button');
-  if (b?.dataset.mode) setViewMode(b.dataset.mode as typeof viewMode);
-});
-
-/** Reads the text inside a box drawn on the scan (SVG coordinates: x, -y of the drawing). */
-async function readArea(sx: number, sy: number, sw: number, sh: number): Promise<void> {
-  const d = state.drawing;
-  if (!d?.scan || sw <= 0 || sh <= 0) return;
-  const px = d.scan.pxPerMm;
-  const pageH = d.bounds.maxY;
-  if (sw * px < 6 || sh * px < 6) {
-    toast('Drag a larger box around the text.', false, 3000);
-    return;
-  }
-  busy('Reading the selected area…');
-  try {
-    const texts = await new Promise<TextEntity[]>((resolve, reject) => {
-      const w = getScanWorker();
-      w.onmessage = (ev: MessageEvent<ScanResponse>) => {
-        if (ev.data.type === 'region-done') resolve(ev.data.texts);
-        else if (ev.data.type === 'error') reject(new Error(ev.data.message));
-      };
-      const req: ScanRequest = { type: 'region', x: sx * px, y: (pageH + sy) * px, w: sw * px, h: sh * px };
-      w.postMessage(req);
-    });
-    if (!texts.length) {
-      toast('No text was found in that area.', false, 4000);
-      return;
-    }
-    // replace texts that were read before inside the box
-    const inBox = (t: TextEntity) => {
-      const cx = t.pos.x + (Math.cos(t.rotation) * t.width) / 2;
-      const cy = -(t.pos.y + (Math.sin(t.rotation) * t.width) / 2);
-      return cx >= sx && cx <= sx + sw && cy >= sy && cy <= sy + sh;
-    };
-    const old = new Set(d.entities.filter((e): e is TextEntity => e.kind === 'text' && inBox(e)).map((e) => e.id));
-    d.entities = d.entities.filter((e) => !old.has(e.id)).concat(texts);
-    state.dims = state.dims.filter((x) => !old.has(x.textId));
-    for (const t of texts) {
-      findLengthTokens(t.text).forEach((tok, i) =>
-        state.dims.push({ ...tok, id: `${t.id}-r${i}`, textId: t.id, original: t.text.slice(tok.start, tok.end) }),
-      );
-    }
-    d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
-    renderStatic();
-    renderDynamic();
-    renderReport();
-    toast(`Read: ${texts.map((t) => `"${t.text}"`).join(', ')}`, false, 5000);
-  } catch (err) {
-    toast(`Could not read the area: ${(err as Error).message}`, true);
-  } finally {
-    busy(null);
-  }
-}
-
-/** Lets the user fix a text the scan reader got wrong; its dimensions are found again. */
-function editText(textId: string): void {
-  const t = textOf(textId);
-  if (!t) return;
-  const next = window.prompt('Correct the text read from the scan (leave it empty to remove it):', t.text);
-  if (next === null || next === t.text) return;
-  if (next.trim() === '') {
-    // not text at all (a misread mark): drop it and its values
-    const d = state.drawing!;
-    d.entities = d.entities.filter((e) => e.id !== textId);
-    for (const x of state.dims) if (x.textId === textId) state.used.delete(x.id);
-    state.dims = state.dims.filter((x) => x.textId !== textId);
-    d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
-    renderStatic();
-    renderDynamic();
-    renderReport();
-    return;
-  }
-  const scale = [...next].length / Math.max(1, [...t.text].length);
-  t.text = next.trim();
-  t.width *= scale;
-  t.ocrConfidence = 1;
-  const others = state.dims.filter((x) => x.textId !== textId);
-  for (const x of state.dims) if (x.textId === textId) state.used.delete(x.id);
-  const fresh = findLengthTokens(t.text, { isDimension: t.isDimension, dimType: t.dimType }).map((tok, i) => ({
-    ...tok,
-    id: `${textId}-e${Date.now()}-${i}`,
-    textId,
-    original: t.text.slice(tok.start, tok.end),
-  }));
-  // keep list order: put the corrected text's dimensions where the old ones were
-  const at = state.dims.findIndex((x) => x.textId === textId);
-  state.dims = at < 0 ? [...others, ...fresh] : [...others.slice(0, at), ...fresh, ...others.slice(at)];
-  renderStatic();
-  renderDynamic();
-  renderReport();
 }
 
 function afterLoad(): void {
@@ -347,15 +168,7 @@ function afterLoad(): void {
   for (const id of ['export-dxf', 'export-pdf', 'convert-all', 'reset-all']) $<HTMLButtonElement>(id).disabled = false;
   $<HTMLButtonElement>('export-dxf12').disabled = d.source === 'pdf';
   $('export-dxf12').hidden = d.source === 'pdf';
-  $('export-dxf').title = d.scan
-    ? 'DXF (R12) traced from the scan: lines, arcs, circles, arrowheads and the text that was read'
-    : d.source === 'pdf'
-      ? 'DXF (R12) with the recognised lines, arcs, circles, text and blocks'
-      : 'DXF: the original file with only the converted texts changed';
-  $('view-mode').hidden = !d.scan;
-  $('read-area').hidden = !d.scan;
-  setPicking(false);
-  setViewMode(d.scan ? viewMode : 'scan');
+  $('export-dxf').title = d.source === 'pdf' ? 'DXF (R12) with the recognised lines, arcs, circles, text and blocks' : 'DXF: the original file with only the converted texts changed';
   renderStatic();
   renderDynamic();
   renderReport();
@@ -386,9 +199,6 @@ function textOf(id: string): TextEntity | undefined {
   return state.drawing?.entities.find((e): e is TextEntity => e.kind === 'text' && e.id === id);
 }
 
-const PENCIL =
-  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M11.5 2.5l2 2L6 12l-3 1 1-3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>';
-
 function renderList(): void {
   const list = $('dim-list');
   const n = state.dims.length;
@@ -406,11 +216,7 @@ function renderList(): void {
     li.className = d.converted ? 'converted' : '';
     const t = textOf(d.textId);
     const ctx = t && t.text.trim() !== d.original.trim() ? t.text : '';
-    const unsure = t?.ocrConfidence !== undefined && t.ocrConfidence < 0.9;
-    li.innerHTML =
-      `${unsure ? '<span class="flag" title="Read from the scan with low confidence: please check">?</span>' : ''}<span class="orig"></span>` +
-      `${d.converted ? '<span class="arrow">→</span><span class="conv"></span>' : ''}<span class="ctx"></span>` +
-      `${t?.ocrConfidence !== undefined ? `<button class="edit" title="Correct the text read from the scan" aria-label="Correct text">${PENCIL}</button>` : ''}`;
+    li.innerHTML = `<span class="orig"></span>${d.converted ? '<span class="arrow">→</span><span class="conv"></span>' : ''}<span class="ctx"></span>`;
     li.querySelector('.orig')!.textContent = d.original;
     if (d.converted) li.querySelector('.conv')!.textContent = d.converted.text;
     li.querySelector('.ctx')!.textContent = ctx;
@@ -437,7 +243,6 @@ function renderReport(): void {
     w.appendChild(li);
   }
   if (d.source === 'pdf') {
-    if (d.scan) $('report').setAttribute('open', '');
     const li = document.createElement('li');
     li.textContent = 'PDF geometry is stored in paper millimetres (1:1 with the printed sheet), not at the real object size.';
     w.appendChild(li);
@@ -496,43 +301,11 @@ svg.addEventListener('wheel', (ev) => {
 }, { passive: false });
 
 let drag: { x: number; y: number; vx: number; vy: number; moved: boolean; id: number } | null = null;
-let picking = false;
-let pick: { x0: number; y0: number; x1: number; y1: number; id: number } | null = null;
-const selRect = document.getElementById('selection') as unknown as SVGRectElement;
-
-function setPicking(on: boolean): void {
-  picking = on;
-  svg.classList.toggle('picking', on);
-  $('read-area').classList.toggle('on', on);
-  if (!on) selRect.setAttribute('hidden', '');
-}
-$('read-area').addEventListener('click', () => {
-  setPicking(!picking);
-  if (picking) toast('Drag a box around the text to read.', false, 4000);
-});
-
 svg.addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) return;
-  if (picking) {
-    const p = clientToSvg(ev.clientX, ev.clientY);
-    pick = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, id: ev.pointerId };
-    svg.setPointerCapture(ev.pointerId);
-    return;
-  }
   drag = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y, moved: false, id: ev.pointerId };
 });
 svg.addEventListener('pointermove', (ev) => {
-  if (pick && pick.id === ev.pointerId) {
-    const p = clientToSvg(ev.clientX, ev.clientY);
-    pick.x1 = p.x;
-    pick.y1 = p.y;
-    selRect.removeAttribute('hidden');
-    selRect.setAttribute('x', String(Math.min(pick.x0, pick.x1)));
-    selRect.setAttribute('y', String(Math.min(pick.y0, pick.y1)));
-    selRect.setAttribute('width', String(Math.abs(pick.x1 - pick.x0)));
-    selRect.setAttribute('height', String(Math.abs(pick.y1 - pick.y0)));
-    return;
-  }
   if (!drag || drag.id !== ev.pointerId) return;
   const dx = ev.clientX - drag.x;
   const dy = ev.clientY - drag.y;
@@ -548,13 +321,6 @@ svg.addEventListener('pointermove', (ev) => {
   applyView();
 });
 svg.addEventListener('pointerup', (ev) => {
-  if (pick && pick.id === ev.pointerId) {
-    const p = pick;
-    pick = null;
-    setPicking(false);
-    void readArea(Math.min(p.x0, p.x1), Math.min(p.y0, p.y1), Math.abs(p.x1 - p.x0), Math.abs(p.y1 - p.y0));
-    return;
-  }
   const d = drag;
   drag = null;
   svg.classList.remove('panning');
@@ -616,11 +382,6 @@ function locate(id: string): void {
 $('dim-list').addEventListener('click', (ev) => {
   const li = (ev.target as HTMLElement).closest('li');
   if (!li?.dataset.dim) return;
-  if ((ev.target as HTMLElement).closest('.edit')) {
-    const dim = state.dims.find((x) => x.id === li.dataset.dim);
-    if (dim) editText(dim.textId);
-    return;
-  }
   if (ev.detail >= 2) return;
   toggleDimension(li.dataset.dim);
   locate(li.dataset.dim);
