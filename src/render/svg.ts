@@ -108,12 +108,11 @@ export function renderGeometry(d: Drawing, skipTextIds: Set<string>): string {
   for (const b of Object.values(d.blocks)) {
     defs.push(`<g id="${blockId(b.name)}">${b.entities.map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e))).join('')}</g>`);
   }
-  const shown = d.entities.filter((e) => !(e.kind === 'text' && skipTextIds.has(e.id)));
-  const draw = (e: Entity) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e));
-  // Scans: the page image goes underneath the traced drawing, so the view can show either.
-  const under = shown.filter((e) => e.style.layer === 'SCAN').map(draw).join('');
-  const body = shown.filter((e) => e.style.layer !== 'SCAN').map(draw).join('');
-  return `<defs>${defs.join('')}</defs><g class="underlay">${under}</g><g class="traced">${body}</g>`;
+  const body = d.entities
+    .filter((e) => !(e.kind === 'text' && skipTextIds.has(e.id)))
+    .map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e)))
+    .join('');
+  return `<defs>${defs.join('')}</defs>${body}`;
 }
 
 function insertSvg(e: Extract<Entity, { kind: 'insert' }>, d: Drawing): string {
@@ -147,35 +146,6 @@ export function layoutText(t: TextEntity, dims: Dimension[]): TextLayout {
   return { text: display.text, pos, align: 'center', width, display };
 }
 
-export interface ScanPatch {
-  /** Fraction of the original text width where the replaced part starts. */
-  from: number;
-  text: string;
-  pos: Pt;
-  align: TextEntity['align'];
-}
-
-/**
- * For text read from a scan, only the part from the first converted value to
- * the end of the line is redrawn: the scanned characters before it are kept,
- * so OCR misreads elsewhere in the line never reach the output.
- */
-export function scanPatch(t: TextEntity, dims: Dimension[]): ScanPatch | null {
-  const conv = dims.filter((d) => d.converted);
-  if (!conv.length) return null;
-  const cut = Math.min(...conv.map((d) => d.start));
-  const lay = layoutText(t, dims);
-  if (cut === 0 || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
-  const from = cut / Math.max(1, t.text.length);
-  const shift = t.width * from;
-  return {
-    from,
-    text: lay.text.slice(cut),
-    pos: { x: t.pos.x + Math.cos(t.rotation) * shift, y: t.pos.y + Math.sin(t.rotation) * shift },
-    align: 'left',
-  };
-}
-
 /** Polygon (drawing coordinates) around dimension `dimId` in a laid-out text. */
 export function dimPolygon(t: TextEntity, layout: TextLayout, dimId: string): Pt[] {
   const r = layout.display.ranges.get(dimId);
@@ -202,19 +172,7 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
     const list = byText.get(e.id);
     if (!list) continue;
     const layout = layoutText(e, list);
-    const patch = d.scan ? scanPatch(e, list) : null;
-    if (patch) {
-      // on the scan: cover the original from the first converted value on, then write the new part
-      const pad = (0.1 * e.fontSize) / Math.max(e.width, 1e-9);
-      const mask = textCorners(e, Math.max(-pad, patch.from - pad / 2), 1 + pad);
-      texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
-      texts.push(textSvg(e, patch.text, patch.pos, patch.align, 'converted onscan'));
-      // the full converted line for the traced view
-      texts.push(textSvg(e, layout.text, layout.pos, layout.align, 'converted ocr'));
-    } else {
-      const cls = layout.display.changed ? 'converted' : d.scan ? 'ocr' : '';
-      texts.push(textSvg(e, layout.text, layout.pos, layout.align, cls));
-    }
+    texts.push(textSvg(e, layout.text, layout.pos, layout.align, layout.display.changed ? 'converted' : ''));
     for (const dim of list) {
       const poly = dimPolygon(e, layout, dim.id);
       const cls = `dim${dim.converted ? ' converted' : ''}${showHighlights ? '' : ' quiet'}`;

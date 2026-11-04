@@ -128,17 +128,6 @@ function mergeRuns(items: RawText[]): RawText[] {
   return lines;
 }
 
-/** Native resolution of the largest image, in pixels per mm of the page. */
-function maxImagePx(entities: Entity[], pageWidthMm: number): number {
-  let best = 0;
-  for (const e of entities) {
-    if (e.kind !== 'image' || !e.pxW) continue;
-    const wMm = Math.hypot(e.p10.x - e.p00.x, e.p10.y - e.p00.y);
-    if (wMm > pageWidthMm * 0.3) best = Math.max(best, e.pxW / wMm);
-  }
-  return best;
-}
-
 export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, opts: PdfImportOptions = {}): Promise<Drawing> {
   const task = pdfjs.getDocument({ data: bytes.slice(), isEvalSupported: false, useSystemFonts: false, ...opts.docParams }) as { promise: Promise<any>; destroy(): Promise<void> };
   const doc = await task.promise;
@@ -361,19 +350,14 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
     stats.blocks = Object.keys(blocks).length;
 
     const texts = finalEntities.filter((e): e is TextEntity => e.kind === 'text');
-    // A page that is (almost) only an image is a scan: it needs OCR and tracing.
-    const pageArea = vp.width * vp.height * PT_TO_MM * PT_TO_MM;
-    const imageArea = finalEntities.reduce((s, e) => {
-      if (e.kind !== 'image') return s;
-      const ux = e.p10.x - e.p00.x;
-      const uy = e.p10.y - e.p00.y;
-      const vx = e.p01.x - e.p00.x;
-      const vy = e.p01.y - e.p00.y;
-      return s + Math.abs(ux * vy - uy * vx);
-    }, 0);
-    const vectorCount = finalEntities.filter((e) => e.kind !== 'image' && e.kind !== 'text').length;
-    const isScan = texts.length < 3 && imageArea > pageArea * 0.4 && vectorCount < 50;
-    if (!texts.length && !isScan) warnings.push('No text found on this page. The text may have been converted to outlines, so dimensions cannot be detected.');
+    if (!texts.length) {
+      const hasImage = finalEntities.some((e) => e.kind === 'image');
+      warnings.push(
+        hasImage
+          ? 'No text found on this page. It looks like a scanned drawing; scanned PDFs (OCR) are not supported yet.'
+          : 'No text found on this page. The text may have been converted to outlines, so dimensions cannot be detected.',
+      );
+    }
     if (pendingImages.length && !opts.encodeImage) warnings.push('Images were found but not decoded.');
 
     return {
@@ -384,8 +368,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
       bounds: drawingBounds(finalEntities, blocks),
       geometryUnit: 'mm',
       detectedDimensionUnit: guessDimensionUnit(texts.map((t) => t.text), 'mm'),
-      pdf: { bytes, pageIndex, pageCount: doc.numPages, userToDrawing, widthPt: vp.width, heightPt: vp.height, imagePx: maxImagePx(finalEntities, vp.width * PT_TO_MM) },
-      scan: isScan ? { href: '', pxPerMm: 0, processed: false, ocrLines: 0, traced: 0, skewDeg: 0 } : undefined,
+      pdf: { bytes, pageIndex, pageCount: doc.numPages, userToDrawing },
       stats,
       warnings,
     };

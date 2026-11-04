@@ -111,8 +111,6 @@ export interface TextEntity extends Base {
   isDimension?: boolean;
   /** Dimension type when isDimension: angular dimensions are never converted. */
   dimType?: 'linear' | 'radius' | 'diameter' | 'angular' | 'ordinate';
-  /** Recognition confidence (0..1) for text read from a scan. */
-  ocrConfidence?: number;
   dxf?: DxfTextSource;
 }
 
@@ -184,11 +182,6 @@ export interface PdfSource {
   pageCount: number;
   /** Affine [a,b,c,d,e,f] mapping PDF user space -> drawing coordinates. */
   userToDrawing: number[];
-  /** Page size as displayed (after /Rotate), in points. */
-  widthPt: number;
-  heightPt: number;
-  /** Native resolution of the page's main image, pixels per mm (0 = none). */
-  imagePx: number;
 }
 
 export interface DxfSource {
@@ -200,22 +193,9 @@ export interface DxfSource {
   hasHandles: boolean;
 }
 
-export interface ScanInfo {
-  /** Page image (data URL) shown under the traced drawing. */
-  href: string;
-  pxPerMm: number;
-  /** false until OCR and tracing have run. */
-  processed: boolean;
-  ocrLines: number;
-  traced: number;
-  skewDeg: number;
-}
-
 export interface Drawing {
   name: string;
   source: SourceKind;
-  /** Set for image-only (scanned) PDF pages. */
-  scan?: ScanInfo;
   entities: Entity[];
   blocks: Record<string, Block>;
   bounds: Box;
@@ -246,14 +226,9 @@ export function emptyStats(): ImportStats {
 }
 
 let idCounter = 0;
-let idScope = '';
-/** Web Workers create entities too: give them their own id namespace. */
-export function setIdScope(scope: string): void {
-  idScope = scope;
-}
 export function newId(prefix = 'e'): string {
   idCounter += 1;
-  return `${idScope}${prefix}${idCounter}`;
+  return `${prefix}${idCounter}`;
 }
 
 export function countEntities(entities: Entity[], stats: ImportStats): void {
