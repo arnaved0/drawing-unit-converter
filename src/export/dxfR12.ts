@@ -7,6 +7,7 @@ import { flattenSegs, normAngle } from '../geom';
 import type { Dimension } from '../dimensions';
 import type { Drawing, Entity, Pt, Style, TextEntity } from '../model';
 import { layoutText } from '../render/svg';
+import { TEXT_OUTLINES } from '../model';
 import { encodeR12Text } from '../textcodes';
 
 /** Cap height / em size for the Arial-like fonts PDFs mostly use. */
@@ -109,6 +110,8 @@ function entity(ctx: Ctx, e: Entity, dimsByText: Map<string, Dimension[]>): void
   const st = e.style;
   // White fills are paper-coloured masks/backgrounds in PDFs; in CAD they would show up as solid areas.
   if (st.stroke === false && isWhite(st.fill ?? st.color) && e.kind !== 'text') return;
+  // letters drawn as outlines that OCR read: the TEXT entity replaces them
+  if (st.layer === TEXT_OUTLINES) return;
   switch (e.kind) {
     case 'line':
       common(ctx, 'LINE', st);
@@ -131,8 +134,10 @@ function entity(ctx: Ctx, e: Entity, dimsByText: Map<string, Dimension[]>): void
       ctx.w.pair(51, (normAngle(e.end) * 180) / Math.PI);
       break;
     case 'curve': {
-      const pts = flattenSegs(e.start, e.segs, 16);
-      polyline(ctx, st, e.closed ? pts.slice(0, -1) : pts, e.closed);
+      for (const sp of [{ start: e.start, segs: e.segs, closed: e.closed }, ...(e.more ?? [])]) {
+        const pts = flattenSegs(sp.start, sp.segs, 16);
+        polyline(ctx, st, sp.closed ? pts.slice(0, -1) : pts, sp.closed);
+      }
       break;
     }
     case 'solid': {

@@ -27,6 +27,7 @@ describe('finds lengths in drawing text', () => {
     ['11.2 mm', ['11.2 mm']],
     ['Plate 6mm thick, 304SS', ['6mm']],
     ['2X R5', ['5']],
+    ['Dia0', []],
     ['\u00d830', ['30']],
     ['R20', ['20']],
     ['100x50mm', ['100', '50mm']],

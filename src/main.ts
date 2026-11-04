@@ -10,6 +10,8 @@ import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs } from './importers/pdf';
 import type { Drawing, LengthUnit, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
+import { preprocessPage, type PreprocessResult } from './ocr/preprocess';
+import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
 import { DEFAULT_SETTINGS, formatLength, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -64,9 +66,51 @@ function toast(msg: string, error = false, ms = 5000): void {
   toastTimer = window.setTimeout(() => (t.hidden = true), ms);
 }
 
-function busy(text: string | null): void {
+function busy(text: string | null, fraction?: number): void {
   $('busy').hidden = text === null;
   if (text) $('busy-text').textContent = text;
+  $('busy-progress').hidden = fraction === undefined || text === null;
+  if (fraction !== undefined) $('busy-bar').style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
+}
+
+// ------------------------------------------------------------------ Scan & OCR before import
+
+const OCR_KEY = 'duc.ocr.v1';
+let ocrWorker: Worker | null = null;
+/** "Read text with OCR first": on unless the user turned it off. */
+const ocrOn = () => localStorage.getItem(OCR_KEY) !== 'off';
+
+/** Recognises text in a page image in the OCR worker. */
+function recogniseInWorker(img: { width: number; height: number; data: Uint8ClampedArray }, pxPerMm: number): Promise<FoundLine[]> {
+  ocrWorker ??= new Worker(new URL('./ocr/worker.ts', import.meta.url), { type: 'module' });
+  const w = ocrWorker;
+  return new Promise((resolve, reject) => {
+    w.onmessage = (ev: MessageEvent<OcrResponse>) => {
+      const m = ev.data;
+      if (m.type === 'progress') busy(`Scan & OCR: ${m.label}…`, 0.05 + m.fraction * 0.9);
+      else if (m.type === 'done') resolve(m.lines);
+      else reject(new Error(m.message));
+    };
+    w.onerror = (ev) => reject(new Error(ev.message || 'The text recognition worker failed to start.'));
+    const req: OcrRequest = { base: BASE, width: img.width, height: img.height, data: img.data, pxPerMm };
+    w.postMessage(req, [img.data.buffer]);
+  });
+}
+
+/** Adds an invisible text layer with the recognised text to one page of a PDF. */
+async function ocrPdf(bytes: Uint8Array, pageIndex: number): Promise<PreprocessResult> {
+  const task = pdfjs.getDocument({ data: bytes.slice(), ...PDF_PARAMS });
+  try {
+    const doc = await task.promise;
+    const page = await doc.getPage(Math.min(pageIndex, doc.numPages - 1) + 1);
+    return await preprocessPage(bytes, page as never, Math.min(pageIndex, doc.numPages - 1), {
+      recognise: recogniseInWorker,
+      createCanvas: (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h }),
+      onProgress: (f, label) => busy(`Scan & OCR: ${label}…`, f < 1 ? 0.02 : 0.97),
+    });
+  } finally {
+    await task.destroy();
+  }
 }
 
 function download(data: Uint8Array | string, name: string, type: string): void {
@@ -133,9 +177,26 @@ async function openFile(file: File, pageIndex = 0): Promise<void> {
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
     let d: Drawing;
-    if (ext === 'pdf') d = await importPdf(pdfjs as unknown as PdfJs, bytes, file.name, { pageIndex, encodeImage, docParams: PDF_PARAMS });
+    let ocrNote = '';
+    let pdfBytes = bytes;
+    if (ext === 'pdf' && ocrOn()) {
+      // Scan & OCR first: text drawn as outlines or scanned becomes real text
+      const res = await ocrPdf(bytes, pageIndex);
+      pdfBytes = res.bytes;
+      ocrNote = res.added
+        ? `Scan & OCR added ${res.added} line${res.added === 1 ? '' : 's'} of text read from the page` +
+          (res.alreadyText ? ` (${res.alreadyText} more were already text)` : '') +
+          '. Values read by OCR can be misread: check them before relying on the result.'
+        : res.alreadyText
+          ? 'Scan & OCR: all text on this page was already real text, nothing was added.'
+          : 'Scan & OCR found no text on this page.';
+      if (res.unsupported) ocrNote += ` ${res.unsupported} line${res.unsupported === 1 ? '' : 's'} in a script the PDF font cannot hold (for example Chinese) stayed as drawn.`;
+      busy('Reading drawing…');
+    }
+    if (ext === 'pdf') d = await importPdf(pdfjs as unknown as PdfJs, pdfBytes, file.name, { pageIndex, encodeImage, docParams: PDF_PARAMS });
     else if (ext === 'dxf') d = importDxf(bytes, file.name);
     else d = await importDwg(bytes, file.name);
+    if (ocrNote) d.warnings.unshift(ocrNote);
     state.drawing = d;
     state.file = file;
     state.dims = detectDimensions(d);
@@ -442,6 +503,18 @@ $('source-unit').addEventListener('change', () => {
     if (d.converted && s && !d.unit) convert(d, s);
   }
   renderDynamic();
+});
+
+const ocrBox = $<HTMLInputElement>('ocr-first');
+ocrBox.checked = ocrOn();
+ocrBox.addEventListener('change', () => {
+  localStorage.setItem(OCR_KEY, ocrBox.checked ? 'on' : 'off');
+  // offer to apply the new setting to the PDF that is open
+  $('ocr-again').hidden = !(state.file && state.drawing?.source === 'pdf');
+});
+$('ocr-again').addEventListener('click', () => {
+  $('ocr-again').hidden = true;
+  if (state.file) void openFile(state.file, state.drawing?.pdf?.pageIndex ?? 0);
 });
 
 $<HTMLInputElement>('highlight').addEventListener('change', (ev) => {

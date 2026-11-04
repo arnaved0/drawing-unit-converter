@@ -26,6 +26,27 @@ function sameCircle(a: { c: Pt; r: number }, b: { c: Pt; r: number }): boolean {
   return dist(a.c, b.c) <= t && Math.abs(a.r - b.r) <= t;
 }
 
+/**
+ * A filled path made of several subpaths (a letter "8", "0" or "B", a washer):
+ * one entity, so the inner subpaths stay holes instead of being filled solid.
+ */
+export function compoundFill(sps: RawSubpath[], style: Style, evenOdd: boolean): Entity | null {
+  const parts = sps.filter((s) => s.segs.length > 0);
+  if (!parts.length) return null;
+  const toSegs = (s: RawSubpath): PathSeg[] => s.segs.map((g) => (g.t === 'L' ? { t: 'L', p: g.p } : { t: 'C', c1: g.c1, c2: g.c2, p: g.p }));
+  const [first, ...rest] = parts;
+  return {
+    kind: 'curve',
+    id: newId(),
+    style: { ...style, stroke: false, fill: style.fill ?? style.color },
+    start: first.start,
+    segs: toSegs(first),
+    closed: true,
+    more: rest.map((s) => ({ start: s.start, segs: toSegs(s), closed: true })),
+    evenOdd,
+  };
+}
+
 export function subpathToEntity(sp: RawSubpath, style: Style, paint: Paint): Entity | null {
   // 1. classify every Bezier segment
   const segs: PathSeg[] = [];

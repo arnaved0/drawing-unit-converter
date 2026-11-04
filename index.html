@@ -49,7 +49,10 @@
           <button class="btn icon" id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
           <button class="btn icon" id="zoom-fit" title="Fit drawing" aria-label="Fit drawing"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
         </div>
-        <div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text">Reading drawing…</span></div>
+        <div id="busy" class="busy" hidden>
+          <div class="row-inline"><div class="spinner"></div><span id="busy-text">Reading drawing…</span></div>
+          <div class="progress" id="busy-progress" hidden><div id="busy-bar"></div></div>
+        </div>
         <div id="toast" class="toast" hidden></div>
       </section>
 
@@ -90,6 +93,13 @@
             </select>
           </label>
           <p class="hint" id="source-hint"></p>
+        </section>
+
+        <section>
+          <h2>PDF text</h2>
+          <label class="check"><input type="checkbox" id="ocr-first" checked /> Read text with Scan &amp; OCR first</label>
+          <p class="hint">Turns text that is drawn as outlines or scanned into real text before the dimensions are found. Takes about 15 s per page; the text recogniser (21 MB) downloads once.</p>
+          <button id="ocr-again" class="btn" hidden>Open the PDF again</button>
         </section>
 
         <section>
