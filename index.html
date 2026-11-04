@@ -43,6 +43,7 @@
             <g id="dimtexts"></g>
             <g id="overlays"></g>
           </g>
+          <rect id="selection" hidden></rect>
         </svg>
         <div class="zoom" id="zoom-controls" hidden>
           <button class="btn icon" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
@@ -110,6 +111,16 @@
           <label class="check"><input type="checkbox" id="highlight" checked /> Highlight dimensions</label>
         </section>
 
+        <section>
+          <h2>Boxes</h2>
+          <div class="seg" id="box-mode" role="group" aria-label="What a click does">
+            <button data-mode="convert" class="on" title="Click a box to convert it">Convert</button>
+            <button data-mode="add" title="Drag a box around a dimension that was missed">+ Add box</button>
+            <button data-mode="remove" title="Click a box to remove it">− Remove box</button>
+          </div>
+          <p class="hint" id="box-hint">Click a box to convert its value. Right-drag to pan.</p>
+        </section>
+
         <section class="grow">
           <h2>Dimensions <span id="dim-count" class="count"></span></h2>
           <p class="hint" id="dim-hint">Open a drawing to list its dimensions.</p>
@@ -125,6 +136,18 @@
         </section>
       </aside>
     </main>
+    <dialog id="box-dialog" class="dialog">
+      <form method="dialog">
+        <h3>Add a dimension box</h3>
+        <p id="box-read" class="hint"></p>
+        <label class="field"><span>Text in the box</span><input id="box-text" type="text" autocomplete="off" spellcheck="false" /></label>
+        <p class="hint">Include the unit if the drawing shows one, for example <code>88.9</code>, <code>R 25.4mm</code> or <code>Dia 22.3mm</code>.</p>
+        <div class="row">
+          <button value="cancel" class="btn" formnovalidate>Cancel</button>
+          <button value="ok" class="btn primary">Add box</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

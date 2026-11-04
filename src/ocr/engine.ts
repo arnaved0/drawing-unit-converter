@@ -373,15 +373,114 @@ async function readDetected(m: OcrModels, img: RGBAImage, rect: DetBox['rect'], 
   return best ? [best] : [];
 }
 
+/**
+ * Reads the text in an image of a box the user drew (with a margin of `pad`
+ * pixels around it). Text is detected inside the image, so slanted text gets
+ * its own rotated box; if nothing is detected, the whole box is read, along
+ * its longer side.
+ */
+export async function readRegion(m: OcrModels, img: RGBAImage, pad: number, pxPerMm: number): Promise<OcrLine[]> {
+  const w = img.width - 2 * pad;
+  const h = img.height - 2 * pad;
+  // same detector scale as the page pass, so the text boxes match what it finds there
+  const scale = Math.min(1, 8 / pxPerMm);
+  const boxes = (await detectTile(m, img, 0, 0, img.width, img.height, scale)).filter(
+    (b) => b.rect.c.x >= pad - 2 && b.rect.c.x <= pad + w + 2 && b.rect.c.y >= pad - 2 && b.rect.c.y <= pad + h + 2,
+  );
+  // The user pointed here, so try harder than on a whole page: every detected
+  // box, its two halves when it may hold stacked lines, and the whole box.
+  const out: OcrLine[] = [];
+  for (const b of boxes) {
+    const r = await readBox(m, img, b.rect);
+    if (r) out.push(r);
+    const parts = splitStacked(img, b.rect, b.rect.short * 0.45);
+    if (parts.length > 1) for (const p of parts) {
+      const pr = await readBox(m, img, p);
+      if (pr) out.push(pr);
+    }
+  }
+  // Characters lie wholly inside the box; dimension and extension lines run
+  // out of it. Read the ink that does not touch the edge of the image, too.
+  const tight = innerInk(img);
+  const rects: DetBox['rect'][] = [];
+  if (tight) {
+    const tw = tight.maxX - tight.minX;
+    const th = tight.maxY - tight.minY;
+    const m2 = Math.max(3, Math.min(tw, th) * 0.25);
+    const c = { x: (tight.minX + tight.maxX) / 2, y: (tight.minY + tight.maxY) / 2 };
+    rects.push(tw >= th ? { c, u: { x: 1, y: 0 }, long: tw + 2 * m2, short: th + 2 * m2 } : { c, u: { x: 0, y: -1 }, long: th + 2 * m2, short: tw + 2 * m2 });
+  }
+  const c = { x: img.width / 2, y: img.height / 2 };
+  rects.push(w >= h ? { c, u: { x: 1, y: 0 }, long: w, short: h } : { c, u: { x: 0, y: -1 }, long: h, short: w });
+  // readBox tries all four directions here, so sideways text is read too
+  for (const rect of rects) {
+    const r = await readBox(m, img, rect, true);
+    if (r) out.push(r);
+  }
+  return out.sort((a, b) => b.confidence - a.confidence);
+}
+
+/** Bounding box of the dark ink in connected pieces that do not touch the image edge. */
+function innerInk(img: RGBAImage): { minX: number; minY: number; maxX: number; maxY: number } | null {
+  const { width: w, height: h, data } = img;
+  const ink = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const r = data[i * 4];
+    const g = data[i * 4 + 1];
+    const b = data[i * 4 + 2];
+    const lum = (r * 77 + g * 150 + b * 29) >> 8;
+    if (lum < 160 || (Math.max(r, g, b) - Math.min(r, g, b) > 70 && lum < 220)) ink[i] = 1;
+  }
+  const seen = new Uint8Array(w * h);
+  const box = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  const stack: number[] = [];
+  for (let i = 0; i < w * h; i++) {
+    if (!ink[i] || seen[i]) continue;
+    const comp: number[] = [];
+    let edge = false;
+    stack.push(i);
+    seen[i] = 1;
+    while (stack.length) {
+      const k = stack.pop()!;
+      comp.push(k);
+      const x = k % w;
+      const y = (k - x) / w;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) edge = true;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          const n = ny * w + nx;
+          if (ink[n] && !seen[n]) {
+            seen[n] = 1;
+            stack.push(n);
+          }
+        }
+      }
+    }
+    if (edge || comp.length < 6) continue;
+    for (const k of comp) {
+      const x = k % w;
+      const y = (k - x) / w;
+      if (x < box.minX) box.minX = x;
+      if (x > box.maxX) box.maxX = x;
+      if (y < box.minY) box.minY = y;
+      if (y > box.maxY) box.maxY = y;
+    }
+  }
+  return Number.isFinite(box.minX) ? { minX: box.minX, minY: box.minY, maxX: box.maxX + 1, maxY: box.maxY + 1 } : null;
+}
+
 /** Reads one box in each plausible direction and keeps the most confident reading. */
-async function readBox(m: OcrModels, img: RGBAImage, rect: DetBox['rect']): Promise<OcrLine | null> {
+async function readBox(m: OcrModels, img: RGBAImage, rect: DetBox['rect'], allDirections = false): Promise<OcrLine | null> {
   const { c, u, long, short } = rect;
   const v = { x: -u.y, y: u.x };
   const candidates: { u: P; len: number; hgt: number }[] = [
     { u, len: long, hgt: short },
     { u: { x: -u.x, y: -u.y }, len: long, hgt: short },
   ];
-  if (long < short * 1.6) candidates.push({ u: v, len: short, hgt: long }, { u: { x: -v.x, y: -v.y }, len: short, hgt: long });
+  if (allDirections || long < short * 1.6) candidates.push({ u: v, len: short, hgt: long }, { u: { x: -v.x, y: -v.y }, len: short, hgt: long });
   // conventional reading directions first; stop early on a confident read
   candidates.sort((a, b) => Number(readable(b.u)) - Number(readable(a.u)));
   let best: OcrLine | null = null;

@@ -61,6 +61,22 @@ are not added to the text layer; they stay as drawn.
 
 OCR can misread characters, so check converted values against the drawing.
 
+### Adding and removing boxes
+
+The **Boxes** controls in the side panel choose what a click on the drawing does:
+
+* **Convert** (default): click a box to convert its value.
+* **+ Add box**: drag a box around a dimension that was missed. On a PDF, the
+  text inside it is read with OCR and shown for you to check or correct
+  before it is added; on DXF/DWG you type it. Every number in a box counts as
+  a length (angles excepted). A box drawn over a wrongly read value replaces it.
+* **− Remove box**: click a box to remove it. The **×** in the dimension list
+  does the same in any mode.
+
+Every add and remove can be undone with the **Undo** button in the message
+that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans
+the drawing in every mode.
+
 ### Which values count as dimensions
 
 * A number with a length unit anywhere in a text: `305mm Silicone wire leads`,
@@ -121,6 +137,7 @@ src/
   importers/dwg.ts      DWG -> DXF (LibreDWG WebAssembly) -> model
   analysis/shapes.ts    Bezier/path -> line, arc, circle, polyline, solid
   analysis/blocks.ts    Repeated geometry -> blocks
+  boxes.ts              Dimension boxes added or removed by hand
   ocr/preprocess.ts     Scan & OCR: render page, recognise text, add the text layer
   ocr/textLayer.ts      Invisible text layer (PdfCraft's method) written with pdf-lib
   ocr/engine.ts         PP-OCRv5 text detection + recognition (rotated text, stacked lines)

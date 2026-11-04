@@ -2,7 +2,7 @@
 // Runs text recognition off the main thread.
 
 import * as ort from 'onnxruntime-web/wasm';
-import { buildCharset, runOcr, type OcrLine, type OcrModels } from './engine';
+import { buildCharset, readRegion, runOcr, type OcrLine, type OcrModels } from './engine';
 import type { RGBAImage } from './image';
 import { lineColor } from './color';
 
@@ -12,6 +12,8 @@ export interface OcrRequest {
   height: number;
   data: Uint8ClampedArray;
   pxPerMm: number;
+  /** Set for a user-drawn box: the image is that box plus this margin in pixels. */
+  regionPad?: number;
 }
 
 export interface FoundLine extends OcrLine {
@@ -73,7 +75,10 @@ self.onmessage = async (ev: MessageEvent<OcrRequest>) => {
   try {
     const m = await loadModels(msg.base);
     const img: RGBAImage = { width: msg.width, height: msg.height, data: msg.data };
-    const lines = await runOcr(m, img, { pxPerMm: msg.pxPerMm, onProgress: (f, label) => post({ type: 'progress', fraction: 0.1 + f * 0.9, label }) });
+    const lines =
+      msg.regionPad !== undefined
+        ? await readRegion(m, img, msg.regionPad, msg.pxPerMm)
+        : await runOcr(m, img, { pxPerMm: msg.pxPerMm, onProgress: (f, label) => post({ type: 'progress', fraction: 0.1 + f * 0.9, label }) });
     post({ type: 'done', lines: lines.map((l) => ({ ...l, rgb: lineColor(img, l) })) });
   } catch (err) {
     post({ type: 'error', message: (err as Error).message ?? String(err) });

@@ -1,16 +1,18 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { convertDimension, detectDimensions, type Dimension } from './dimensions';
+import { convertDimension, detectDimensions, findLengthTokens, type Dimension } from './dimensions';
+import { addBoxedText, textFromBox, textFromPlacement, type Placement } from './boxes';
+import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
 import { exportPdfOverlay, exportPdfPlot } from './export/pdf';
 import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs } from './importers/pdf';
-import type { Drawing, LengthUnit, TextEntity } from './model';
+import type { Box, Drawing, Entity, LengthUnit, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
-import { preprocessPage, type PreprocessResult } from './ocr/preprocess';
+import { normaliseOcrText, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
 import { DEFAULT_SETTINGS, formatLength, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
@@ -57,9 +59,19 @@ const view = { x: 0, y: 0, w: 100, h: 100 };
 // ------------------------------------------------------------------ helpers
 
 let toastTimer = 0;
-function toast(msg: string, error = false, ms = 5000): void {
+function toast(msg: string, error = false, ms = 5000, action?: { label: string; run: () => void }): void {
   const t = $('toast');
   t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-action';
+    b.textContent = action.label;
+    b.onclick = () => {
+      t.hidden = true;
+      action.run();
+    };
+    t.appendChild(b);
+  }
   t.classList.toggle('error', error);
   t.hidden = false;
   clearTimeout(toastTimer);
@@ -81,18 +93,19 @@ let ocrWorker: Worker | null = null;
 const ocrOn = () => localStorage.getItem(OCR_KEY) !== 'off';
 
 /** Recognises text in a page image in the OCR worker. */
-function recogniseInWorker(img: { width: number; height: number; data: Uint8ClampedArray }, pxPerMm: number): Promise<FoundLine[]> {
+function recogniseInWorker(img: { width: number; height: number; data: Uint8ClampedArray }, pxPerMm: number, regionPad?: number): Promise<FoundLine[]> {
   ocrWorker ??= new Worker(new URL('./ocr/worker.ts', import.meta.url), { type: 'module' });
   const w = ocrWorker;
   return new Promise((resolve, reject) => {
     w.onmessage = (ev: MessageEvent<OcrResponse>) => {
       const m = ev.data;
-      if (m.type === 'progress') busy(`Scan & OCR: ${m.label}…`, 0.05 + m.fraction * 0.9);
+      // a box is read quickly; only the page pass (and the first model download) shows progress
+      if (m.type === 'progress') busy(regionPad === undefined ? `Scan & OCR: ${m.label}…` : `Reading the text in the box: ${m.label}…`, 0.05 + m.fraction * 0.9);
       else if (m.type === 'done') resolve(m.lines);
       else reject(new Error(m.message));
     };
     w.onerror = (ev) => reject(new Error(ev.message || 'The text recognition worker failed to start.'));
-    const req: OcrRequest = { base: BASE, width: img.width, height: img.height, data: img.data, pxPerMm };
+    const req: OcrRequest = { base: BASE, width: img.width, height: img.height, data: img.data, pxPerMm, regionPad };
     w.postMessage(req, [img.data.buffer]);
   });
 }
@@ -230,6 +243,8 @@ function afterLoad(): void {
   $<HTMLButtonElement>('export-dxf12').disabled = d.source === 'pdf';
   $('export-dxf12').hidden = d.source === 'pdf';
   $('export-dxf').title = d.source === 'pdf' ? 'DXF (R12) with the recognised lines, arcs, circles, text and blocks' : 'DXF: the original file with only the converted texts changed';
+  undoStack.length = 0;
+  setMode('convert');
   renderStatic();
   renderDynamic();
   renderReport();
@@ -266,9 +281,9 @@ function renderList(): void {
   const done = state.dims.filter((d) => d.converted).length;
   $('dim-count').textContent = n ? `${done}/${n}` : '';
   $('dim-hint').textContent = n
-    ? 'Click a dimension in the drawing or in this list to convert it. Click it again to undo.'
+    ? 'Click a dimension in the drawing or in this list to convert it. Click it again to undo. × removes a box.'
     : state.drawing
-      ? 'No dimensions found. Dimensions must be text (not outlines or a scan).'
+      ? 'No dimensions found. Use "Add box" to mark dimensions by hand.'
       : 'Open a drawing to list its dimensions.';
   list.innerHTML = '';
   for (const d of state.dims) {
@@ -277,7 +292,10 @@ function renderList(): void {
     li.className = d.converted ? 'converted' : '';
     const t = textOf(d.textId);
     const ctx = t && t.text.trim() !== d.original.trim() ? t.text : '';
-    li.innerHTML = `<span class="orig"></span>${d.converted ? '<span class="arrow">→</span><span class="conv"></span>' : ''}<span class="ctx"></span>`;
+    li.innerHTML =
+      `<span class="orig"></span>${d.converted ? '<span class="arrow">→</span><span class="conv"></span>' : ''}<span class="ctx"></span>` +
+      `<button class="remove" title="Remove this box" aria-label="Remove this box">×</button>`;
+    if (t?.manual) li.classList.add('manual');
     li.querySelector('.orig')!.textContent = d.original;
     if (d.converted) li.querySelector('.conv')!.textContent = d.converted.text;
     li.querySelector('.ctx')!.textContent = ctx;
@@ -362,11 +380,35 @@ svg.addEventListener('wheel', (ev) => {
 }, { passive: false });
 
 let drag: { x: number; y: number; vx: number; vy: number; moved: boolean; id: number } | null = null;
+/** A box being drawn in "Add box" mode (SVG user coordinates). */
+let pick: { x0: number; y0: number; x1: number; y1: number; id: number } | null = null;
+const selRect = document.getElementById('selection') as unknown as SVGRectElement;
+
+svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
 svg.addEventListener('pointerdown', (ev) => {
-  if (ev.button !== 0) return;
-  drag = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y, moved: false, id: ev.pointerId };
+  // right or middle button always pans; left button draws a box in "Add box" mode
+  if (ev.button === 0 && mode === 'add' && state.drawing) {
+    const p = clientToSvg(ev.clientX, ev.clientY);
+    pick = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, id: ev.pointerId };
+    svg.setPointerCapture(ev.pointerId);
+    return;
+  }
+  if (ev.button > 2) return;
+  drag = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y, moved: ev.button !== 0, id: ev.pointerId };
+  if (ev.button !== 0) svg.setPointerCapture(ev.pointerId);
 });
 svg.addEventListener('pointermove', (ev) => {
+  if (pick && pick.id === ev.pointerId) {
+    const p = clientToSvg(ev.clientX, ev.clientY);
+    pick.x1 = p.x;
+    pick.y1 = p.y;
+    selRect.removeAttribute('hidden');
+    selRect.setAttribute('x', String(Math.min(pick.x0, pick.x1)));
+    selRect.setAttribute('y', String(Math.min(pick.y0, pick.y1)));
+    selRect.setAttribute('width', String(Math.abs(pick.x1 - pick.x0)));
+    selRect.setAttribute('height', String(Math.abs(pick.y1 - pick.y0)));
+    return;
+  }
   if (!drag || drag.id !== ev.pointerId) return;
   const dx = ev.clientX - drag.x;
   const dy = ev.clientY - drag.y;
@@ -382,15 +424,28 @@ svg.addEventListener('pointermove', (ev) => {
   applyView();
 });
 svg.addEventListener('pointerup', (ev) => {
+  if (pick && pick.id === ev.pointerId) {
+    const p = pick;
+    pick = null;
+    selRect.setAttribute('hidden', '');
+    // SVG y is the negated drawing y
+    const box = { minX: Math.min(p.x0, p.x1), maxX: Math.max(p.x0, p.x1), minY: -Math.max(p.y0, p.y1), maxY: -Math.min(p.y0, p.y1) };
+    void addBox(box);
+    return;
+  }
   const d = drag;
   drag = null;
   svg.classList.remove('panning');
   if (!d || d.moved) return;
   const target = (ev.target as Element).closest?.('[data-dim]') as SVGElement | null;
-  if (target?.dataset.dim) toggleDimension(target.dataset.dim);
+  if (!target?.dataset.dim) return;
+  if (mode === 'remove') removeDimension(target.dataset.dim);
+  else toggleDimension(target.dataset.dim);
 });
 svg.addEventListener('pointercancel', () => {
   drag = null;
+  pick = null;
+  selRect.setAttribute('hidden', '');
   svg.classList.remove('panning');
 });
 window.addEventListener('resize', () => applyView());
@@ -443,9 +498,206 @@ function locate(id: string): void {
 $('dim-list').addEventListener('click', (ev) => {
   const li = (ev.target as HTMLElement).closest('li');
   if (!li?.dataset.dim) return;
+  if ((ev.target as HTMLElement).closest('.remove')) {
+    removeDimension(li.dataset.dim);
+    return;
+  }
   if (ev.detail >= 2) return;
+  if (mode === 'remove') {
+    removeDimension(li.dataset.dim);
+    return;
+  }
   toggleDimension(li.dataset.dim);
   locate(li.dataset.dim);
+});
+
+// ------------------------------------------------------------------ boxes: add, remove, undo
+
+type Mode = 'convert' | 'add' | 'remove';
+let mode: Mode = 'convert';
+const MODE_HINTS: Record<Mode, string> = {
+  convert: 'Click a box to convert its value. Right-drag to pan.',
+  add: 'Drag a box around a dimension that was missed. Its text is read for you to check. Right-drag to pan, Esc to stop.',
+  remove: 'Click a box to remove it (it was not a dimension, or was read wrongly). Esc to stop.',
+};
+
+function setMode(m: Mode): void {
+  mode = m;
+  svg.classList.toggle('mode-add', m === 'add');
+  svg.classList.toggle('mode-remove', m === 'remove');
+  for (const b of document.querySelectorAll<HTMLButtonElement>('#box-mode button')) b.classList.toggle('on', b.dataset.mode === m);
+  $('box-hint').textContent = MODE_HINTS[m];
+}
+$('box-mode').addEventListener('click', (ev) => {
+  const b = (ev.target as HTMLElement).closest('button');
+  if (b?.dataset.mode) setMode(b.dataset.mode === mode ? 'convert' : (b.dataset.mode as Mode));
+});
+
+interface Snapshot {
+  entities: Entity[];
+  dims: Dimension[];
+  used: Map<string, ConversionSettings>;
+}
+const undoStack: Snapshot[] = [];
+function snapshot(): void {
+  const d = state.drawing;
+  if (!d) return;
+  undoStack.push({ entities: [...d.entities], dims: state.dims.map((x) => ({ ...x })), used: new Map(state.used) });
+  if (undoStack.length > 50) undoStack.shift();
+}
+function undo(): void {
+  const s = undoStack.pop();
+  const d = state.drawing;
+  if (!s || !d) return;
+  d.entities = s.entities;
+  state.dims = s.dims;
+  state.used = s.used;
+  d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
+  renderStatic();
+  renderDynamic();
+  toast('Undone.', false, 2000);
+}
+
+function removeDimension(id: string): void {
+  const dim = state.dims.find((x) => x.id === id);
+  if (!dim) return;
+  snapshot();
+  state.dims = state.dims.filter((x) => x.id !== id);
+  state.used.delete(id);
+  const d = state.drawing!;
+  // a text the user boxed has no other use: drop it with its last value
+  const t = textOf(dim.textId);
+  if (t?.manual && !state.dims.some((x) => x.textId === t.id)) d.entities = d.entities.filter((e) => e.id !== t.id);
+  renderStatic();
+  renderDynamic();
+  toast(`Removed "${dim.original}".`, false, 6000, { label: 'Undo', run: undo });
+}
+
+/** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
+async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placement: Placement; color: string } | null> {
+  if (!d.pdf) return null;
+  const toUser = invert(d.pdf.userToDrawing);
+  const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
+  try {
+    const doc = await task.promise;
+    const page = await doc.getPage(d.pdf.pageIndex + 1);
+    // 200 dpi like the page pass; small boxes are rendered finer
+    const boxMm = Math.min(box.maxX - box.minX, box.maxY - box.minY);
+    const pxPerMm = Math.min(24, Math.max(200 / 25.4, 40 / Math.max(boxMm, 0.5)));
+    const vp = page.getViewport({ scale: (pxPerMm * 25.4) / 72 });
+    const corners = [
+      { x: box.minX, y: box.minY },
+      { x: box.maxX, y: box.maxY },
+      { x: box.minX, y: box.maxY },
+      { x: box.maxX, y: box.minY },
+    ].map((p) => {
+      const u = apply(toUser, p);
+      return vp.convertToViewportPoint(u.x, u.y) as number[];
+    });
+    const pad = Math.round(Math.max(8, Math.min(...[0, 1].map((k) => Math.max(...corners.map((c) => c[k])) - Math.min(...corners.map((c) => c[k])))) * 0.2));
+    const x0 = Math.floor(Math.min(...corners.map((c) => c[0]))) - pad;
+    const y0 = Math.floor(Math.min(...corners.map((c) => c[1]))) - pad;
+    const w = Math.ceil(Math.max(...corners.map((c) => c[0]))) + pad - x0;
+    const h = Math.ceil(Math.max(...corners.map((c) => c[1]))) + pad - y0;
+    if (w * h > 16e6) return null;
+    const canvas = Object.assign(document.createElement('canvas'), { width: w, height: h });
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    await page.render({ canvasContext: ctx, viewport: vp, canvas, transform: [1, 0, 0, 1, -x0, -y0] } as never).promise;
+    const img = ctx.getImageData(0, 0, w, h);
+    const lines = await recogniseInWorker({ width: w, height: h, data: img.data }, pxPerMm, pad);
+    if (!lines.length) return null;
+    // prefer a line that holds a length, then the most confident one
+    const scored = lines
+      .map((l) => ({ l, text: normaliseOcrText(l.text) ?? l.text }))
+      .sort((a, b) => Number(findLengthTokens(b.text, { isDimension: true }).length > 0) - Number(findLengthTokens(a.text, { isDimension: true }).length > 0) || b.l.confidence - a.l.confidence);
+    const best = scored[0];
+    const map = (x: number, y: number): [number, number] => {
+      const [ux, uy] = vp.convertToPdfPoint(x + x0, y + y0) as number[];
+      const p = apply(d.pdf!.userToDrawing, { x: ux, y: uy });
+      return [p.x, p.y];
+    };
+    const pl = placeLine(best.l, map);
+    const hex = '#' + best.l.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+    return {
+      text: best.text,
+      placement: { origin: { x: pl.origin[0], y: pl.origin[1] }, across: { x: pl.across[0], y: pl.across[1] }, up: { x: pl.up[0], y: pl.up[1] } },
+      color: hex,
+    };
+  } finally {
+    await task.destroy();
+  }
+}
+
+/** Asks the user to confirm or type the text of a box. Resolves null on cancel. */
+function askBoxText(read: string | null): Promise<string | null> {
+  const dlg = $<HTMLDialogElement>('box-dialog');
+  const input = $<HTMLInputElement>('box-text');
+  $('box-read').textContent =
+    read === null ? 'Nothing could be read in the box. Type the value as it appears on the drawing.' : 'Read from the drawing. Correct it if needed.';
+  input.value = read ?? '';
+  // Enter means "Add box" (the form's first button is Cancel)
+  input.onkeydown = (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      dlg.close('ok');
+    }
+  };
+  dlg.returnValue = '';
+  dlg.showModal();
+  input.focus();
+  input.select();
+  return new Promise((resolve) => {
+    dlg.onclose = () => resolve(dlg.returnValue === 'ok' && input.value.trim() ? input.value.trim() : null);
+  });
+}
+
+async function addBox(box: Box): Promise<void> {
+  const d = state.drawing;
+  if (!d) return;
+  if (box.maxX - box.minX < 0.3 || box.maxY - box.minY < 0.3) {
+    toast('Drag a box around the dimension (the box was too small).', false, 3500);
+    return;
+  }
+  let read: Awaited<ReturnType<typeof readBoxText>> = null;
+  if (d.pdf) {
+    busy('Reading the text in the box…');
+    try {
+      read = await readBoxText(d, box);
+    } catch (err) {
+      console.warn(err);
+    } finally {
+      busy(null);
+    }
+  }
+  const text = await askBoxText(read?.text ?? null);
+  if (text === null) return;
+  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, box);
+  const edit = addBoxedText(d, state.dims, box, t);
+  const added = edit.dims.filter((x) => x.textId === t.id);
+  if (!added.length) {
+    toast(`"${text}" holds no length to convert (angles and counts are left alone).`, true, 6000);
+    return;
+  }
+  snapshot();
+  d.entities = edit.entities;
+  state.dims = edit.dims;
+  for (const id of edit.replaced) state.used.delete(id);
+  d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
+  renderStatic();
+  renderDynamic();
+  const replaced = edit.replaced.length ? ` It replaces ${edit.replaced.length} box${edit.replaced.length === 1 ? '' : 'es'} that ${edit.replaced.length === 1 ? 'was' : 'were'} there.` : '';
+  toast(`Added "${added.map((x) => x.original).join('", "')}".${replaced}`, false, 6000, { label: 'Undo', run: undo });
+}
+
+window.addEventListener('keydown', (ev) => {
+  if ((ev.target as HTMLElement).closest?.('input, select, textarea, dialog')) return;
+  if (ev.key === 'Escape') setMode('convert');
+  else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
+    ev.preventDefault();
+    undo();
+  }
 });
 
 $('convert-all').addEventListener('click', () => {
