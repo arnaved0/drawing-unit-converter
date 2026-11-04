@@ -152,7 +152,6 @@ function entity(ctx: Ctx, e: Entity, dimsByText: Map<string, Dimension[]>): void
       break;
     }
     case 'image': {
-      if (e.style.layer === 'SCAN') break; // the scan itself: its content is traced instead
       // R12 has no raster images: keep the frame so the position is not lost.
       const p11 = { x: e.p10.x + e.p01.x - e.p00.x, y: e.p10.y + e.p01.y - e.p00.y };
       polyline(ctx, { ...st, layer: 'IMAGES' }, [e.p00, e.p10, p11, e.p01], true);

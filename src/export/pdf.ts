@@ -33,7 +33,7 @@ import { displayColor } from '../aci';
 import type { Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
-import { layoutText, scanPatch } from '../render/svg';
+import { layoutText } from '../render/svg';
 
 function hexRgb(hex: string) {
   const v = parseInt(hex.replace('#', '').slice(0, 6), 16) || 0;
@@ -98,19 +98,9 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{
     const dirU = applyVec(toUser, { x: Math.cos(t.rotation), y: Math.sin(t.rotation) });
     const angle = (Math.atan2(dirU.y, dirU.x) * 180) / Math.PI;
     const color = hexRgb(displayColor(t.style.color));
-    const patch = d.scan ? scanPatch(t, list) : null;
-    const safe = winAnsiSafe(font, patch ? patch.text : lay.text);
+    const safe = winAnsiSafe(font, lay.text);
 
-    if (patch && !safe.lossy) {
-      // scanned page: replace only from the first converted value to the end of the line
-      const pad = (0.08 * t.fontSize) / Math.max(t.width, 1e-9);
-      polygon(page, textCorners(t, Math.max(-pad, patch.from - pad / 2), 1 + pad).map((p) => apply(toUser, p)));
-      const w = font.widthOfTextAtSize(safe.text, size);
-      const anchor = apply(toUser, patch.pos);
-      const len = Math.hypot(dirU.x, dirU.y);
-      const shift = patch.align === 'center' ? -w / 2 : patch.align === 'right' ? -w : 0;
-      page.drawText(safe.text, { x: anchor.x + (dirU.x / len) * shift, y: anchor.y + (dirU.y / len) * shift, size, font, color, rotate: degrees(angle) });
-    } else if (!safe.lossy) {
+    if (!safe.lossy) {
       // cover the whole original text and write the new line
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
       polygon(page, textCorners(t, -pad, 1 + pad).map((p) => apply(toUser, p)));

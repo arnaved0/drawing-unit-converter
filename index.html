@@ -17,12 +17,6 @@
       <input id="file-input" type="file" accept=".pdf,.dxf,.dwg,application/pdf" hidden />
       <span id="file-name" class="file-name"></span>
       <select id="page-select" hidden aria-label="PDF page"></select>
-      <div class="view-mode" id="view-mode" hidden role="group" aria-label="Show">
-        <button data-mode="scan" class="on" title="The scanned page, with converted values on top">Scan</button>
-        <button data-mode="traced" title="The drawing rebuilt from the scan as lines, arcs, circles and text (what the DXF contains)">Traced</button>
-        <button data-mode="both" title="Traced drawing over a faded scan, to compare them">Both</button>
-      </div>
-      <button id="read-area" class="btn" hidden title="A dimension was missed? Click here, then drag a box around it on the drawing to read it">Read text in area</button>
       <div class="spacer"></div>
       <div class="export" role="group" aria-label="Download">
         <span class="export-label">Download</span>
@@ -49,17 +43,13 @@
             <g id="dimtexts"></g>
             <g id="overlays"></g>
           </g>
-          <rect id="selection" hidden></rect>
         </svg>
         <div class="zoom" id="zoom-controls" hidden>
           <button class="btn icon" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
           <button class="btn icon" id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
           <button class="btn icon" id="zoom-fit" title="Fit drawing" aria-label="Fit drawing"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></button>
         </div>
-        <div id="busy" class="busy" hidden>
-          <div class="row-inline"><div class="spinner"></div><span id="busy-text">Reading drawing…</span></div>
-          <div class="progress" id="busy-progress" hidden><div id="busy-bar"></div></div>
-        </div>
+        <div id="busy" class="busy" hidden><div class="spinner"></div><span id="busy-text">Reading drawing…</span></div>
         <div id="toast" class="toast" hidden></div>
       </section>
 

@@ -30,39 +30,6 @@ click a dimension to convert it to another unit, then download the result as
 | DXF | [dxf-parser](https://github.com/gdsestimating/dxf-parser). DIMENSION entities, TEXT, MTEXT, blocks, polylines with arcs, splines and ellipses. |
 | DWG | [LibreDWG](https://www.gnu.org/software/libredwg/) compiled to WebAssembly ([libredwg-web](https://github.com/mlightcad/libredwg-web)) converts DWG to DXF in the browser; the DXF path then reads it. The reader (about 11 MB) is only downloaded when a DWG is opened. |
 
-### Scanned drawings
-
-A PDF page that is only an image (a scan, a photo, a "print to image") is
-recognised automatically and processed in the browser:
-
-1. **Text** is read with [PaddleOCR PP-OCRv5](https://github.com/PaddlePaddle/PaddleOCR)
-   (mobile models, about 21 MB, downloaded once and cached) on
-   [ONNX Runtime Web](https://onnxruntime.ai/). The detector finds text at any
-   angle, so vertical and slanted dimensions are read, as well as Chinese labels.
-   Every text gets its position, angle, size and colour, so the normal
-   dimension detection and conversion work on it.
-2. **Line work** is traced into CAD geometry: the paper is evened out, ink is
-   separated from the background, filled arrowheads are found, and the lines
-   are thinned to centre lines and fitted with lines, arcs and circles. Dashed
-   and dash-dot lines and circles become one entity with a dash pattern, and
-   colours are kept.
-
-The view switch at the top shows **Scan** (the original page with converted
-values on top), **Traced** (the rebuilt drawing, which is what the DXF
-contains) or **Both**. Downloads:
-
-* **PDF** keeps the scanned page. Only the converted values are covered and
-  rewritten, from the value to the end of its line, so the rest of the scan
-  stays exactly as it was.
-* **DXF** contains the traced geometry and the text that was read.
-
-Text recognition can misread characters. Values read with low confidence are
-marked **?** in the list. Use the pencil button to correct a text (or empty it
-to remove it). If a value was missed, use **Read text in area** and drag a box
-around it.
-
-Processing takes about 15-25 s per A3 page on a laptop.
-
 ### Which values count as dimensions
 
 * A number with a length unit anywhere in a text: `305mm Silicone wire leads`,
@@ -82,11 +49,8 @@ like "Length in mm" or the DXF `$INSUNITS` setting, and can be changed in the pa
 * **DWG export** is not built yet. No open-source library can write DWG reliably
   in a browser. The plan is a small conversion server. Until then, download the
   DXF and save it as DWG in your CAD program.
-* **Scans:** tracing is best on clean scans of 200 dpi or more. On faint or
-  blurry copies, large circles can come out as several arcs or chords, and
-  small shapes such as hex bolt heads may be traced as circles. The scan view
-  and the PDF download are not affected, because they keep the original image.
-  Text that a vector PDF stores as outlines (not as text) is not detected.
+* **Scanned PDFs** (images of drawings) need OCR, which is planned. Text that the
+  PDF stores as outlines cannot be detected either.
 * PDF geometry is exported at paper scale (1 mm on the sheet = 1 drawing unit),
   not at the real size of the part.
 * In PDF output, the old value is covered with a white box and the new value is
@@ -109,9 +73,6 @@ npm run build      # production build in dist/
 (needs `pip install reportlab ezdxf`). They imitate the PDFs the tool was
 designed for: CAD-exported heater drawings with coloured, rotated and per-character
 text, CJK labels, dash-dot centre lines and repeated bolt heads.
-`scripts/make_scans.py` (needs `pymupdf pillow`) turns them into image-only
-PDFs in `samples/scanned/`: blurred, noisy, slightly tilted, JPEG-compressed,
-plus one low-resolution copy on grey, unevenly lit paper.
 
 ### Layout
 
@@ -126,10 +87,6 @@ src/
   importers/dwg.ts      DWG -> DXF (LibreDWG WebAssembly) -> model
   analysis/shapes.ts    Bezier/path -> line, arc, circle, polyline, solid
   analysis/blocks.ts    Repeated geometry -> blocks
-  scan/ocr.ts           PP-OCRv5 text detection + recognition (rotated text, stacked lines)
-  scan/vectorize.ts     Raster line work -> lines, arcs, circles, dashed curves, arrowheads
-  scan/pipeline.ts      Scanned page -> drawing model
-  scan/worker.ts        Web Worker that runs OCR and tracing off the main thread
   render/svg.ts         Model -> SVG preview
   export/dxfPatch.ts    In-place edit of the original DXF
   export/dxfR12.ts      Model -> DXF R12
@@ -142,4 +99,3 @@ Pushing to `main` runs the tests and deploys to GitHub Pages
 ## License
 
 GPL-3.0-or-later, because the DWG reader (LibreDWG) is GPL-3.0. See [LICENSE](LICENSE).
-The OCR models in `public/models/ppocrv5/` are Apache-2.0 (see the README there).
