@@ -121,6 +121,8 @@ export interface TextEntity extends Base {
    * over a white patch instead.
    */
   ocr?: boolean;
+  /** Added by the user with a box. */
+  manual?: boolean;
   dxf?: DxfTextSource;
 }
 

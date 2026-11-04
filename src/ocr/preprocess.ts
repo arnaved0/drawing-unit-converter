@@ -82,6 +82,25 @@ export async function existingTextBoxes(page: PdfPage, vp: { transform: number[]
   return out;
 }
 
+/**
+ * Where the text of an OCR line goes: start of the baseline, the baseline
+ * vector to its end and the em ("up") vector, mapped through `map` from image
+ * pixels to the target coordinates.
+ */
+export function placeLine(
+  l: { c: { x: number; y: number }; u: { x: number; y: number }; len: number; hgt: number },
+  map: (x: number, y: number) => [number, number],
+): { origin: [number, number]; across: [number, number]; up: [number, number] } {
+  const d = { x: -l.u.y, y: l.u.x }; // glyph "down" (image y is down)
+  const em = l.hgt * EM_PER_BOX;
+  const width = l.len * WIDTH_PER_BOX;
+  const b0 = { x: l.c.x - l.u.x * (width / 2) + d.x * 0.36 * em, y: l.c.y - l.u.y * (width / 2) + d.y * 0.36 * em };
+  const o = map(b0.x, b0.y);
+  const a = map(b0.x + l.u.x * width, b0.y + l.u.y * width);
+  const t = map(b0.x - d.x * em, b0.y - d.y * em);
+  return { origin: o, across: [a[0] - o[0], a[1] - o[1]], up: [t[0] - o[0], t[1] - o[1]] };
+}
+
 export interface PreprocessOptions {
   /** Recognises text in an RGBA image (runs the OCR worker in the browser). */
   recognise: (img: { width: number; height: number; data: Uint8ClampedArray }, pxPerMm: number) => Promise<FoundLine[]>;
@@ -128,16 +147,7 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
       alreadyText++;
       continue;
     }
-    const em = l.hgt * EM_PER_BOX;
-    const width = l.len * WIDTH_PER_BOX;
-    // baseline start and end, and the top of the em square, in image pixels
-    const b0 = { x: l.c.x - l.u.x * (width / 2) + d.x * 0.36 * em, y: l.c.y - l.u.y * (width / 2) + d.y * 0.36 * em };
-    const b1 = { x: b0.x + l.u.x * width, y: b0.y + l.u.y * width };
-    const t0 = { x: b0.x - d.x * em, y: b0.y - d.y * em };
-    const o = toUser(b0.x, b0.y);
-    const a = toUser(b1.x, b1.y);
-    const t = toUser(t0.x, t0.y);
-    words.push({ text, origin: o, across: [a[0] - o[0], a[1] - o[1]], up: [t[0] - o[0], t[1] - o[1]], rgb: l.rgb });
+    words.push({ text, ...placeLine(l, toUser), rgb: l.rgb });
   }
   opts.onProgress?.(1, 'Adding the text layer');
   const out = await withTextLayers(bytes, new Map([[pageIndex, words]]));

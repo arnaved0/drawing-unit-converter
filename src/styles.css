@@ -102,6 +102,26 @@ text.t { pointer-events: none; }
 #dimtexts text.converted { font-weight: 600; }
 #dimtexts polygon.mask { fill: #fff; stroke: none; }
 
+/* boxes: add / remove */
+.seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { flex: 1; border: none; background: #fff; padding: 6px 4px; font: inherit; font-size: 13px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: #fff; }
+.canvas.mode-add { cursor: crosshair; }
+.canvas.mode-remove #overlays polygon.dim { cursor: not-allowed; }
+.canvas.mode-remove #overlays polygon.dim:hover { fill: rgba(196, 40, 40, 0.3); stroke: #c42828; }
+#selection { fill: rgba(31, 107, 173, 0.12); stroke: var(--accent); stroke-width: calc(var(--hair) * 1.5); stroke-dasharray: calc(var(--hair) * 6) calc(var(--hair) * 4); pointer-events: none; }
+.dim-list .remove { margin-left: 4px; border: none; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 3px; border-radius: 4px; }
+.dim-list .remove:hover { color: #fff; background: #c42828; }
+.dim-list li.manual .orig::after { content: ' (box)'; color: var(--muted); font-size: 11px; }
+.toast-action { margin-left: 12px; background: none; border: 1px solid rgba(255,255,255,0.6); color: #fff; border-radius: 4px; padding: 2px 10px; font: inherit; cursor: pointer; }
+.dialog { border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; width: min(420px, 92vw); box-shadow: 0 10px 40px rgba(0,0,0,0.25); }
+.dialog h3 { margin: 0 0 8px; font-size: 17px; }
+.dialog input { font: inherit; font-size: 16px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.dialog .row { justify-content: flex-end; margin: 12px 0 0; }
+.dialog .row .btn { flex: 0 0 auto; }
+.dialog::backdrop { background: rgba(20, 30, 40, 0.35); }
+
 @media (max-width: 820px) {
   .layout { flex-direction: column; }
   .panel { width: auto; max-height: 45vh; border-left: none; border-top: 1px solid var(--line); }
