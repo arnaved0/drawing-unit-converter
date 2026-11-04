@@ -70,6 +70,10 @@ export interface CurveEntity extends Base {
   start: Pt;
   segs: PathSeg[];
   closed: boolean;
+  /** Further subpaths of the same filled shape (holes of letters, washers). */
+  more?: { start: Pt; segs: PathSeg[]; closed: boolean }[];
+  /** Fill rule for `more`: even-odd instead of non-zero winding. */
+  evenOdd?: boolean;
 }
 /** Filled triangle/quad (arrowheads), like DXF SOLID. */
 export interface SolidEntity extends Base {
@@ -111,6 +115,12 @@ export interface TextEntity extends Base {
   isDimension?: boolean;
   /** Dimension type when isDimension: angular dimensions are never converted. */
   dimType?: 'linear' | 'radius' | 'diameter' | 'angular' | 'ordinate';
+  /**
+   * Invisible text (an OCR text layer) over text that is drawn as outlines or
+   * is part of an image. It is not drawn itself; a converted value is drawn
+   * over a white patch instead.
+   */
+  ocr?: boolean;
   dxf?: DxfTextSource;
 }
 
@@ -224,6 +234,9 @@ export function emptyStats(): ImportStats {
     dimensions: 0,
   };
 }
+
+/** Layer of filled letter shapes that an OCR text layer covers (see importers/pdf.ts). */
+export const TEXT_OUTLINES = 'TEXT_OUTLINES';
 
 let idCounter = 0;
 export function newId(prefix = 'e'): string {

@@ -1,0 +1,92 @@
+"""Make copies of the sample PDFs whose text is drawn as filled glyph outlines.
+
+Many CAD programs export text this way ("text as geometry"): the PDF has no
+text at all, only the letter shapes, so nothing can be read without OCR. Each
+character is replaced by its outline from Bitstream Vera Sans (bundled with
+reportlab), at the same position, size, angle and colour. Characters the font
+lacks (CJK) stay as real text.
+
+Usage: python scripts/make_outlined.py   (needs pymupdf, fonttools, reportlab)
+"""
+import math
+import os
+
+import pymupdf
+import reportlab
+from fontTools.pens.basePen import BasePen
+from fontTools.ttLib import TTFont
+
+HERE = os.path.dirname(__file__)
+SAMPLES = os.path.join(HERE, "..", "samples")
+OUT = os.path.join(SAMPLES, "outlined")
+FONT = os.path.join(os.path.dirname(reportlab.__file__), "fonts", "Vera.ttf")
+
+
+class ShapePen(BasePen):
+    """Draws glyph contours into a PyMuPDF shape through an affine map."""
+
+    def __init__(self, glyphset, shape, xf):
+        super().__init__(glyphset)
+        self.shape = shape
+        self.xf = xf
+        self.cur = None
+
+    def p(self, pt):
+        return pymupdf.Point(*self.xf(pt))
+
+    def _moveTo(self, pt):
+        self.cur = pt
+
+    def _lineTo(self, pt):
+        self.shape.draw_line(self.p(self.cur), self.p(pt))
+        self.cur = pt
+
+    def _curveToOne(self, p1, p2, p3):
+        self.shape.draw_bezier(self.p(self.cur), self.p(p1), self.p(p2), self.p(p3))
+        self.cur = p3
+
+    def _closePath(self):
+        pass
+
+
+def outline(name: str) -> None:
+    font = TTFont(FONT)
+    cmap = font.getBestCmap()
+    gs = font.getGlyphSet()
+    upem = font["head"].unitsPerEm
+    doc = pymupdf.open(os.path.join(SAMPLES, name + ".pdf"))
+    for page in doc:
+        chars = []
+        for block in page.get_text("rawdict")["blocks"]:
+            for line in block.get("lines", []):
+                dx, dy = line["dir"]
+                for span in line["spans"]:
+                    color = span["color"]
+                    rgb = ((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255
+                    for ch in span["chars"]:
+                        if ord(ch["c"]) in cmap and ch["c"].strip():
+                            chars.append((ch["c"], ch["origin"], span["size"], (dx, dy), rgb, ch["bbox"]))
+        # remove the text that gets outlined; keep drawings and images
+        for c in chars:
+            page.add_redact_annot(pymupdf.Rect(c[5]), fill=False)
+        page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE, text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+        for c, (ox, oy), size, (dx, dy), rgb, _ in chars:
+            glyph = cmap[ord(c)]
+            k = size / upem
+            # PyMuPDF page coordinates are y-down; dir is the baseline direction in them
+            def xf(pt, ox=ox, oy=oy, k=k, dx=dx, dy=dy):
+                u, v = pt[0] * k, pt[1] * k
+                return ox + u * dx + v * dy, oy + u * dy - v * dx
+            shape = page.new_shape()
+            gs[glyph].draw(ShapePen(gs, shape, xf))
+            shape.finish(color=None, fill=rgb, closePath=True, even_odd=False)
+            shape.commit()
+    os.makedirs(OUT, exist_ok=True)
+    doc.save(os.path.join(OUT, name + "-outlined.pdf"), garbage=3, deflate=True)
+    print(name, "outlined")
+
+
+if __name__ == "__main__":
+    for n in ("defrost-heater", "flange-heater", "arc-element"):
+        outline(n)
+    _ = math

@@ -30,7 +30,7 @@ function shapeKey(e: Entity, o: Pt): string | null {
     case 'solid':
       return s + 'S' + e.pts.map(p).join(';');
     case 'curve':
-      return s + 'K' + flattenSegs(e.start, e.segs, 4).map(p).join(';');
+      return s + 'K' + [{ start: e.start, segs: e.segs }, ...(e.more ?? [])].map((sp) => flattenSegs(sp.start, sp.segs, 4).map(p).join(';')).join('|');
     default:
       return null;
   }

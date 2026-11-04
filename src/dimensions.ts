@@ -100,7 +100,8 @@ function scan(text: string): Candidate[] {
       if (unit === 'ft' && /^\s?-\s?\d/.test(rest)) continue; // 5'-3" compound values are not parsed
     }
     const value = parseFloat(m[0].replace(/\s/g, ''));
-    if (!Number.isFinite(value)) continue;
+    // a length of 0 is never a dimension (usually a circle or "O" read as a digit)
+    if (!Number.isFinite(value) || value === 0) continue;
     out.push({ start: s, end, value, unit, spaced, kind: kindFromPrefix(before), hasUnit: unit !== null });
   }
   // "100x50mm": the first value of a size takes the unit of the second.

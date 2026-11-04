@@ -80,8 +80,11 @@ export function entitySvg(e: Entity): string {
       const b = { x: e.c.x + e.r * Math.cos(e.end), y: e.c.y + e.r * Math.sin(e.end) };
       return `<path d="M${f(a.x)} ${f(a.y)}A${f(e.r)} ${f(e.r)} 0 ${sweep > Math.PI ? 1 : 0} 1 ${f(b.x)} ${f(b.y)}" style="${strokeStyle(e.style)}"/>`;
     }
-    case 'curve':
-      return `<path d="${segsD(e.start, e.segs, e.closed)}" style="${strokeStyle(e.style, true)}"/>`;
+    case 'curve': {
+      const d = [segsD(e.start, e.segs, e.closed), ...(e.more ?? []).map((s) => segsD(s.start, s.segs, s.closed))].join('');
+      const rule = e.more?.length ? `;fill-rule:${e.evenOdd ? 'evenodd' : 'nonzero'}` : '';
+      return `<path d="${d}" style="${strokeStyle(e.style, true)}${rule}"/>`;
+    }
     case 'solid': {
       const fill = displayColor(e.style.fill ?? e.style.color);
       return `<polygon points="${e.pts.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}" style="fill:${fill};stroke:${fill};stroke-width:var(--hair)"/>`;
@@ -109,7 +112,8 @@ export function renderGeometry(d: Drawing, skipTextIds: Set<string>): string {
     defs.push(`<g id="${blockId(b.name)}">${b.entities.map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e))).join('')}</g>`);
   }
   const body = d.entities
-    .filter((e) => !(e.kind === 'text' && skipTextIds.has(e.id)))
+    // OCR text is invisible: the letters it reads are already drawn (outlines or image)
+    .filter((e) => !(e.kind === 'text' && (skipTextIds.has(e.id) || e.ocr)))
     .map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e)))
     .join('');
   return `<defs>${defs.join('')}</defs>${body}`;
@@ -146,6 +150,36 @@ export function layoutText(t: TextEntity, dims: Dimension[]): TextLayout {
   return { text: display.text, pos, align: 'center', width, display };
 }
 
+export interface OcrPatch {
+  /** Fraction of the text's width where the redrawn part starts. */
+  from: number;
+  text: string;
+  pos: Pt;
+  align: TextEntity['align'];
+}
+
+/**
+ * For OCR text, the original letters stay visible (outlines or image). A
+ * conversion covers the line from its first converted value to the end and
+ * redraws only that part, so text before it keeps its original look and an
+ * OCR misread elsewhere in the line never reaches the output.
+ */
+export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
+  const conv = dims.filter((d) => d.converted);
+  if (!conv.length) return null;
+  const cut = Math.min(...conv.map((d) => d.start));
+  const lay = layoutText(t, dims);
+  if (cut === 0 || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
+  const from = cut / Math.max(1, t.text.length);
+  const shift = t.width * from;
+  return {
+    from,
+    text: lay.text.slice(cut),
+    pos: { x: t.pos.x + Math.cos(t.rotation) * shift, y: t.pos.y + Math.sin(t.rotation) * shift },
+    align: 'left',
+  };
+}
+
 /** Polygon (drawing coordinates) around dimension `dimId` in a laid-out text. */
 export function dimPolygon(t: TextEntity, layout: TextLayout, dimId: string): Pt[] {
   const r = layout.display.ranges.get(dimId);
@@ -172,7 +206,15 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
     const list = byText.get(e.id);
     if (!list) continue;
     const layout = layoutText(e, list);
-    texts.push(textSvg(e, layout.text, layout.pos, layout.align, layout.display.changed ? 'converted' : ''));
+    if (e.ocr) {
+      const patch = ocrPatch(e, list);
+      if (patch) {
+        const pad = (0.1 * e.fontSize) / Math.max(e.width, 1e-9);
+        const mask = textCorners(e, Math.max(-pad, patch.from - pad / 2), 1 + pad);
+        texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
+        texts.push(textSvg(e, patch.text, patch.pos, patch.align, 'converted'));
+      }
+    } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, layout.display.changed ? 'converted' : ''));
     for (const dim of list) {
       const poly = dimPolygon(e, layout, dim.id);
       const cls = `dim${dim.converted ? ' converted' : ''}${showHighlights ? '' : ' quiet'}`;

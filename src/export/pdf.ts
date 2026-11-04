@@ -33,7 +33,7 @@ import { displayColor } from '../aci';
 import type { Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
-import { layoutText } from '../render/svg';
+import { layoutText, ocrPatch } from '../render/svg';
 
 function hexRgb(hex: string) {
   const v = parseInt(hex.replace('#', '').slice(0, 6), 16) || 0;
@@ -98,9 +98,19 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{
     const dirU = applyVec(toUser, { x: Math.cos(t.rotation), y: Math.sin(t.rotation) });
     const angle = (Math.atan2(dirU.y, dirU.x) * 180) / Math.PI;
     const color = hexRgb(displayColor(t.style.color));
-    const safe = winAnsiSafe(font, lay.text);
+    const patch = t.ocr ? ocrPatch(t, list) : null;
+    const safe = winAnsiSafe(font, patch ? patch.text : lay.text);
 
-    if (!safe.lossy) {
+    if (patch && !safe.lossy) {
+      // OCR text: cover the line from the first converted value on and write the new part
+      const pad = (0.08 * t.fontSize) / Math.max(t.width, 1e-9);
+      polygon(page, textCorners(t, Math.max(-pad, patch.from - pad / 2), 1 + pad).map((p) => apply(toUser, p)));
+      const w = font.widthOfTextAtSize(safe.text, size);
+      const anchor = apply(toUser, patch.pos);
+      const len = Math.hypot(dirU.x, dirU.y) || 1;
+      const shift = patch.align === 'center' ? -w / 2 : patch.align === 'right' ? -w : 0;
+      page.drawText(safe.text, { x: anchor.x + (dirU.x / len) * shift, y: anchor.y + (dirU.y / len) * shift, size, font, color, rotate: degrees(angle) });
+    } else if (!safe.lossy) {
       // cover the whole original text and write the new line
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
       polygon(page, textCorners(t, -pad, 1 + pad).map((p) => apply(toUser, p)));
@@ -233,15 +243,19 @@ function plotEntity(ctx: PlotCtx, e: Entity, m: Mat, depth: number): void {
       paint(ctx, e.style, [moveTo(s.x, s.y), ...arcBeziers(e.c, e.r, e.start, sweep, m)], false, m, false);
       break;
     }
-    case 'curve':
-      paint(ctx, e.style, segOps(e.start, e.segs, m), e.closed, m, true);
+    case 'curve': {
+      // all subpaths in one path, so letter holes stay holes (non-zero winding)
+      const ops = [{ start: e.start, segs: e.segs, closed: e.closed }, ...(e.more ?? [])].flatMap((sp) => [...segOps(sp.start, sp.segs, m), ...(sp.closed ? [closePath()] : [])]);
+      paint(ctx, e.style, ops, false, m, true);
       break;
+    }
     case 'solid': {
       const st = { ...e.style, fill: e.style.fill ?? e.style.color };
       paint(ctx, st, segOps(e.pts[0], e.pts.slice(1).map((p) => ({ t: 'L' as const, p })), m), true, m, true);
       break;
     }
     case 'text': {
+      if (e.ocr) break; // only PDFs have OCR text, and they are exported by exportPdfOverlay
       const dims = ctx.byText.get(e.id);
       const lay = dims ? layoutText(e, dims) : { text: e.text, pos: e.pos, align: e.align };
       const safe = winAnsiSafe(ctx.font, lay.text);

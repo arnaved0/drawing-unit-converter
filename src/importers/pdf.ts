@@ -4,10 +4,10 @@
 // colour); images are kept; repeated geometry becomes blocks.
 
 import { detectBlocks } from '../analysis/blocks';
-import { subpathToEntity, type RawSeg, type RawSubpath } from '../analysis/shapes';
+import { compoundFill, subpathToEntity, type RawSeg, type RawSubpath } from '../analysis/shapes';
 import { guessDimensionUnit } from '../dimensions';
-import { apply, applyVec, drawingBounds, IDENTITY, matScale, mul, type Mat } from '../geom';
-import { countEntities, emptyStats, newId, type Drawing, type Entity, type Pt, type Style, type TextEntity } from '../model';
+import { apply, applyVec, drawingBounds, entityBox, IDENTITY, matScale, mul, pointInPoly, textCorners, type Mat } from '../geom';
+import { countEntities, emptyStats, newId, TEXT_OUTLINES, type Drawing, type Entity, type Pt, type Style, type TextEntity } from '../model';
 
 /** The subset of the pdf.js API used here (works with the browser and the Node "legacy" build). */
 export interface PdfJs {
@@ -100,6 +100,8 @@ interface RawText {
   width: number;
   color: string;
   font: string;
+  /** Text rendering mode 3: an OCR text layer. */
+  invisible: boolean;
 }
 
 /** Merges runs that continue each other on the same baseline (per-character PDF output). */
@@ -110,7 +112,7 @@ function mergeRuns(items: RawText[]): RawText[] {
     for (let k = lines.length - 1; k >= Math.max(0, lines.length - 12); k--) {
       const l = lines[k];
       if (Math.abs(l.dir.x * it.dir.y - l.dir.y * it.dir.x) > 0.02 || l.dir.x * it.dir.x + l.dir.y * it.dir.y < 0) continue;
-      if (Math.abs(l.size - it.size) > 0.15 * l.size || l.color !== it.color) continue;
+      if (Math.abs(l.size - it.size) > 0.15 * l.size || l.color !== it.color || l.invisible !== it.invisible) continue;
       const end = { x: l.origin.x + l.dir.x * l.width, y: l.origin.y + l.dir.y * l.width };
       const vx = it.origin.x - end.x;
       const vy = it.origin.y - end.y;
@@ -126,6 +128,40 @@ function mergeRuns(items: RawText[]): RawText[] {
     if (!merged) lines.push({ ...it });
   }
   return lines;
+}
+
+
+/**
+ * Moves filled shapes that lie inside an OCR text line to the TEXT_OUTLINES
+ * layer. Triangles are left alone: those are arrowheads.
+ */
+function markTextOutlines(entities: Entity[]): Set<Entity> {
+  const marked = new Set<Entity>();
+  const ocr = entities.filter((e): e is TextEntity => e.kind === 'text' && !!e.ocr);
+  if (!ocr.length) return marked;
+  const polys = ocr.map((t) => ({ poly: textCorners(t, -0.06, 1.06), box: entityBox(t, {}), size: t.fontSize }));
+  for (const e of entities) {
+    const filled = (e.kind === 'curve' || e.kind === 'polyline' || e.kind === 'solid') && e.style.stroke === false && !!e.style.fill;
+    if (!filled || (e.kind === 'solid' && e.pts.length === 3)) continue;
+    const b = entityBox(e, {});
+    for (const p of polys) {
+      if (b.minX < p.box.minX - p.size || b.maxX > p.box.maxX + p.size || b.minY < p.box.minY - p.size || b.maxY > p.box.maxY + p.size) continue;
+      const pts = [
+        { x: b.minX, y: b.minY },
+        { x: b.maxX, y: b.minY },
+        { x: b.maxX, y: b.maxY },
+        { x: b.minX, y: b.maxY },
+      ];
+      // the shape's centre inside the line and the shape no bigger than a letter
+      const c = { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 };
+      if (pointInPoly(c, p.poly) && Math.max(b.maxX - b.minX, b.maxY - b.minY) < p.size * 1.6 && pts.filter((q) => pointInPoly(q, p.poly)).length >= 2) {
+        e.style = { ...e.style, layer: TEXT_OUTLINES };
+        marked.add(e);
+        break;
+      }
+    }
+  }
+  return marked;
 }
 
 export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, opts: PdfImportOptions = {}): Promise<Drawing> {
@@ -223,7 +259,16 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
           if (!paint) break; // endPath (clipping) or unknown
           const data = a[1]?.[0] as ArrayLike<number> | null;
           const m = mul(userToDrawing, gs.ctm);
-          for (const sp of parsePath(data, m)) {
+          const subpaths = parsePath(data, m);
+          if (paint.fill && !paint.stroke && subpaths.length > 1) {
+            // one filled shape with holes (letters drawn as outlines, rings)
+            const st = styleFor('FILLS', gs.fill);
+            st.fill = gs.fill;
+            const ent = compoundFill(subpaths, st, paintOp === OPS.eoFill);
+            if (ent) entities.push(ent);
+            break;
+          }
+          for (const sp of subpaths) {
             if (paint.close) sp.closed = true;
             const color = paint.stroke ? gs.stroke : gs.fill;
             const layer = paint.fill && !paint.stroke ? 'FILLS' : gs.dash.some((d) => d > 0) ? 'DASHED' : 'GEOMETRY';
@@ -290,12 +335,14 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
     for (const item of tc.items as any[]) {
       // Whitespace-only runs are dropped; mergeRuns re-inserts spaces from the gaps.
       if (typeof item.str !== 'string' || !item.str.trim()) continue;
-      // colour: walk the glyph stream in parallel
+      // colour and visibility: walk the glyph stream in parallel
       let color = '#000000';
+      let invisible = false;
       const first = item.str.trim()[0];
       for (let look = gp; look < Math.min(glyphColors.length, gp + 60); look++) {
         if (glyphColors[look].ch === first || glyphColors[look].ch.startsWith(first)) {
           color = glyphColors[look].color;
+          invisible = glyphColors[look].invisible;
           gp = look + item.str.replace(/\s/g, '').length;
           break;
         }
@@ -315,6 +362,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
         width: (item.width ?? 0) * widthScale,
         color,
         font: tc.styles?.[item.fontName]?.fontFamily ?? 'sans-serif',
+        invisible,
       });
     }
     for (const r of mergeRuns(raw)) {
@@ -333,15 +381,20 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
         align: 'left',
         fontFamily: r.font,
       };
+      if (r.invisible) te.ocr = true;
       entities.push(te);
     }
+
+    // Letter shapes under OCR text are that text: they keep being drawn, but are
+    // not part of the geometry (no blocks, not exported to DXF next to the TEXT).
+    const outlines = markTextOutlines(entities);
 
     // repeated geometry -> blocks
     let finalEntities = entities;
     let blocks = {};
     if (opts.detectBlocks !== false) {
-      const det = detectBlocks(entities);
-      finalEntities = det.entities;
+      const det = detectBlocks(entities.filter((e) => !outlines.has(e)));
+      finalEntities = [...det.entities, ...entities.filter((e) => outlines.has(e))];
       blocks = det.blocks;
     }
 
@@ -349,14 +402,10 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
     countEntities(finalEntities, stats);
     stats.blocks = Object.keys(blocks).length;
 
+    stats.texts = finalEntities.filter((e) => e.kind === 'text').length;
     const texts = finalEntities.filter((e): e is TextEntity => e.kind === 'text');
     if (!texts.length) {
-      const hasImage = finalEntities.some((e) => e.kind === 'image');
-      warnings.push(
-        hasImage
-          ? 'No text found on this page. It looks like a scanned drawing; scanned PDFs (OCR) are not supported yet.'
-          : 'No text found on this page. The text may have been converted to outlines, so dimensions cannot be detected.',
-      );
+      warnings.push('No text found on this page. Turn on "Read text with OCR first" to read text that is drawn as outlines or scanned.');
     }
     if (pendingImages.length && !opts.encodeImage) warnings.push('Images were found but not decoded.');
 

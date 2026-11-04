@@ -237,6 +237,7 @@ export function entityBox(e: Entity, blocks: Record<string, Block>, m: Mat = IDE
       break;
     case 'curve':
       for (const p of flattenSegs(e.start, e.segs, 6)) add(p);
+      for (const s of e.more ?? []) for (const p of flattenSegs(s.start, s.segs, 6)) add(p);
       break;
     case 'solid':
       e.pts.forEach(add);

@@ -30,6 +30,37 @@ click a dimension to convert it to another unit, then download the result as
 | DXF | [dxf-parser](https://github.com/gdsestimating/dxf-parser). DIMENSION entities, TEXT, MTEXT, blocks, polylines with arcs, splines and ellipses. |
 | DWG | [LibreDWG](https://www.gnu.org/software/libredwg/) compiled to WebAssembly ([libredwg-web](https://github.com/mlightcad/libredwg-web)) converts DWG to DXF in the browser; the DXF path then reads it. The reader (about 11 MB) is only downloaded when a DWG is opened. |
 
+### Scan & OCR before import (PDF)
+
+Many CAD programs export text as drawn letter shapes instead of real text,
+and scanned drawings have no text at all. So every PDF first goes through a
+Scan & OCR step, then into the converter:
+
+1. The page is rendered at 200 dpi and its text is recognised in a Web Worker
+   with [PaddleOCR PP-OCRv5](https://github.com/PaddlePaddle/PaddleOCR) (mobile
+   models, about 21 MB, downloaded once and cached) on
+   [ONNX Runtime Web](https://onnxruntime.ai/). Text at any angle is found,
+   including vertical and slanted dimensions.
+2. The recognised text is written back into the PDF as an **invisible text
+   layer**, the way [PdfCraft](https://github.com/storytold/pdfcraft)'s Scan &
+   OCR does it (text rendering mode 3, standard Helvetica stretched over each
+   line, inside an `/OCR` marked-content block). The page looks exactly as
+   before but now has real, searchable text.
+3. The converter reads that PDF. Words that the page already had as real text
+   are not added again, so normal PDFs come through unchanged.
+
+The letter shapes under OCR text are kept in the preview and the PDF, so the
+drawing looks like the original. A converted value is drawn on a white patch
+over the original, from the value to the end of its line. In the DXF, the
+letter shapes are replaced by TEXT entities. The downloaded PDF keeps the
+searchable text layer.
+
+The step can be switched off in the side panel (**Read text with Scan & OCR
+first**). Characters the standard PDF font cannot hold (Chinese, for example)
+are not added to the text layer; they stay as drawn.
+
+OCR can misread characters, so check converted values against the drawing.
+
 ### Which values count as dimensions
 
 * A number with a length unit anywhere in a text: `305mm Silicone wire leads`,
@@ -49,8 +80,8 @@ like "Length in mm" or the DXF `$INSUNITS` setting, and can be changed in the pa
 * **DWG export** is not built yet. No open-source library can write DWG reliably
   in a browser. The plan is a small conversion server. Until then, download the
   DXF and save it as DWG in your CAD program.
-* **Scanned PDFs** (images of drawings) need OCR, which is planned. Text that the
-  PDF stores as outlines cannot be detected either.
+* **Scanned PDFs:** text in a scan is read by the Scan & OCR step, but the scan's
+  lines stay an image. They are not traced into DXF geometry.
 * PDF geometry is exported at paper scale (1 mm on the sheet = 1 drawing unit),
   not at the real size of the part.
 * In PDF output, the old value is covered with a white box and the new value is
@@ -73,6 +104,9 @@ npm run build      # production build in dist/
 (needs `pip install reportlab ezdxf`). They imitate the PDFs the tool was
 designed for: CAD-exported heater drawings with coloured, rotated and per-character
 text, CJK labels, dash-dot centre lines and repeated bolt heads.
+`scripts/make_outlined.py` (needs `pymupdf fonttools`) makes copies in
+`samples/outlined/` with every letter drawn as a filled outline and no real
+text, like PDFs exported with "text as geometry".
 
 ### Layout
 
@@ -87,6 +121,10 @@ src/
   importers/dwg.ts      DWG -> DXF (LibreDWG WebAssembly) -> model
   analysis/shapes.ts    Bezier/path -> line, arc, circle, polyline, solid
   analysis/blocks.ts    Repeated geometry -> blocks
+  ocr/preprocess.ts     Scan & OCR: render page, recognise text, add the text layer
+  ocr/textLayer.ts      Invisible text layer (PdfCraft's method) written with pdf-lib
+  ocr/engine.ts         PP-OCRv5 text detection + recognition (rotated text, stacked lines)
+  ocr/worker.ts         Web Worker that runs text recognition off the main thread
   render/svg.ts         Model -> SVG preview
   export/dxfPatch.ts    In-place edit of the original DXF
   export/dxfR12.ts      Model -> DXF R12
@@ -99,3 +137,5 @@ Pushing to `main` runs the tests and deploys to GitHub Pages
 ## License
 
 GPL-3.0-or-later, because the DWG reader (LibreDWG) is GPL-3.0. See [LICENSE](LICENSE).
+The OCR models in `public/models/ppocrv5/` are Apache-2.0 (see the README there).
+The text-layer method follows PdfCraft (Apache-2.0).
