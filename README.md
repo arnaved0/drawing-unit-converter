@@ -82,13 +82,6 @@ and nothing outside it: no part of the old text inside the box shows through,
 and lines and text next to the box stay as they are (in the preview and the
 downloaded PDF). The value is then written again in the box.
 
-**Turning a box for angled dimensions:** when the pointer is near a box you
-drew, a small round handle appears above its top edge. Drag it to turn the box
-around its centre; the angle is shown while you drag. It snaps to upright and
-sideways within 3°, and Shift turns in 15° steps. When you let go, the text in
-the turned box is read again and shown for you to confirm; a converted box
-stays converted. Undo turns it back.
-
 Every add and remove can be undone with the **Undo** button in the message
 that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans
 the drawing in every mode.
@@ -121,6 +114,10 @@ panel for that dimension:
 
 * **Converted text**: type exactly what the new value should read
   (for example `6 IN. TYP`). Applied when you press Enter or leave the field.
+* **Text size**: **−** and **+** make the converted text smaller or larger
+  in 10% steps (50% to 300%). It stays centred on the original line, and the
+  PDF and DXF R12 downloads use the same size. The size belongs to the whole
+  line of text the value is in.
 * **Diameter sign (Ø)**: add a Ø in front of the converted value, or take
   out the drawing's own.
 * **Reset** clears these overrides. **Move text back** undoes a move (see below).
@@ -167,8 +164,9 @@ shows it in the drawing's own text style.
 
 ### Multi-page PDFs
 
-Each page keeps its own boxes, conversions, edits and zoom when you switch
-pages, and is only scanned the first time you open it. The PDF download
+Use the arrows at the bottom of the drawing (or Page Up / Page Down) to move
+between pages; the page number is shown between them. Each page keeps its own
+boxes, conversions, edits and zoom when you switch pages, and is only scanned the first time you open it. The PDF download
 includes the changes from every page you worked on.
 
 ### Diameter sign (Ø)
@@ -223,7 +221,7 @@ like "Length in mm" or the DXF `$INSUNITS` setting, and can be changed in the pa
 * The DXF/DWG preview draws text in Arial (dxf-parser does not read text styles);
   the DXF download is not affected.
 * For PDF input, the DXF download contains only the page on screen.
-* If converted text has been moved in a DXF/DWG drawing, **DXF** downloads the
+* If converted text has been moved or resized in a DXF/DWG drawing, **DXF** downloads the
   simplified R12 copy, since the original file has no place for the white patch.
 * Your work is kept while the page is open, not after a reload.
 * DXF entities that dxf-parser does not support (HATCH, MLEADER, tables …) are

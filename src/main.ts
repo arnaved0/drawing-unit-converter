@@ -2,7 +2,7 @@ import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
-import { addBoxedText, boxPoly, polyAngle, polyCentre, rotatePoly, textFromBox, textFromPlacement, type Placement } from './boxes';
+import { addBoxedText, boxPoly, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
@@ -11,7 +11,7 @@ import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs, type TextStyleHint } from './importers/pdf';
 import type { Box, Drawing, Entity, LengthUnit, Pt, TextEntity } from './model';
-import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry, rotateHandlePoint, rotateHandleSvg } from './render/svg';
+import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
 import { matchFonts, normaliseOcrText, placeFit, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, type Face } from './fonts/faces';
 import { canvasRenderer } from './fonts/match';
@@ -285,12 +285,15 @@ function afterLoad(restore?: { undo: Snapshot[]; view: { x: number; y: number; w
   svg.removeAttribute('hidden');
   $('zoom-controls').hidden = false;
   $('file-name').textContent = d.name;
-  const pageSel = $<HTMLSelectElement>('page-select');
-  if (d.pdf && d.pdf.pageCount > 1) {
-    pageSel.innerHTML = Array.from({ length: d.pdf.pageCount }, (_, i) => `<option value="${i}">Page ${i + 1} of ${d.pdf!.pageCount}</option>`).join('');
-    pageSel.value = String(d.pdf.pageIndex);
-    pageSel.hidden = false;
-  } else pageSel.hidden = true;
+  // page arrows under the drawing, for PDFs with more than one page
+  const multi = !!d.pdf && d.pdf.pageCount > 1;
+  $('pager').hidden = !multi;
+  $('pager').parentElement!.classList.toggle('has-pager', multi);
+  if (d.pdf && multi) {
+    $('page-num').textContent = `Page ${d.pdf.pageIndex + 1} of ${d.pdf.pageCount}`;
+    $<HTMLButtonElement>('page-prev').disabled = d.pdf.pageIndex === 0;
+    $<HTMLButtonElement>('page-next').disabled = d.pdf.pageIndex >= d.pdf.pageCount - 1;
+  }
   $<HTMLSelectElement>('source-unit').value = state.sourceUnit;
   $('source-hint').textContent =
     `Used for values written without a unit (detected ${d.source === 'pdf' ? "from the drawing's notes" : "from the file's settings"}: ${d.detectedDimensionUnit}). Values like "381 mm" keep their own unit.`;
@@ -343,26 +346,21 @@ const NEAR_PX = 28;
 function updateHandles(): void {
   const s = Math.max(view.w / (svg.clientWidth || 1), view.h / (svg.clientHeight || 1));
   const pad = NEAR_PX * s;
-  const handles = [...overlayLayer.querySelectorAll<SVGGElement>(':scope > .handle')];
-  // the move and rotate handles of one text go together
-  const key = (h: SVGGElement) => h.dataset.handle ?? h.dataset.rotate ?? '';
+  const handles = [...overlayLayer.querySelectorAll<SVGGElement>('.handle')];
   // distance from the pointer to each value's area (0 inside); SVG y is the negated drawing y
-  const dist = new Map<string, number>();
-  for (const h of handles) {
-    if (!pointer) continue;
+  const dist = handles.map((h) => {
+    if (!pointer) return Infinity;
     const [x0, y0, x1, y1] = (h.dataset.near ?? '').split(' ').map(Number);
     const dx = Math.max(x0 - pointer.x, 0, pointer.x - x1);
     const dy = Math.max(y0 + pointer.y, 0, -pointer.y - y1);
-    dist.set(key(h), Math.min(dist.get(key(h)) ?? Infinity, Math.hypot(dx, dy)));
-  }
-  // only the nearest value's handles (or every value the pointer is inside)
-  const best = Math.min(...dist.values());
-  for (const h of handles) {
-    const d = dist.get(key(h)) ?? Infinity;
-    const active = moving?.text.id ?? (rotating ? '' : null);
-    const show = active !== null ? active === h.dataset.handle : d <= pad && (d === 0 || d === best);
+    return Math.hypot(dx, dy);
+  });
+  // only the nearest value's handle (or every value the pointer is inside)
+  const best = Math.min(...dist);
+  handles.forEach((h, k) => {
+    const show = moving ? moving.text.id === h.dataset.handle : dist[k] <= pad && (dist[k] === 0 || dist[k] === best);
     h.classList.toggle('near', show);
-  }
+  });
 }
 
 function renderDynamic(): void {
@@ -399,7 +397,7 @@ function renderList(): void {
       `<button class="remove" title="Remove this box" aria-label="Remove this box">×</button></div>` +
       (open ? editPanel(d, t) : '');
     if (t?.manual) li.classList.add('manual');
-    if (d.override || t?.offset) li.classList.add('edited');
+    if (d.override || t?.offset || (t?.sizeScale ?? 1) !== 1) li.classList.add('edited');
     if (open) li.classList.add('open');
     // the diameter sign belongs to the value, even though only the number is replaced
     const sign = t ? (diameterSignBefore(t.text, d.start)?.sign.trim() ?? '') : '';
@@ -427,14 +425,38 @@ function editPanel(d: Dimension, t: TextEntity | undefined): string {
   const o = d.override ?? {};
   // ticked when the converted value has the sign: the drawing's own, or one the user added
   const dia = o.diameter ?? (!!t && hasDiameterSign(d, t.text));
+  const size = t?.sizeScale ?? 1;
   return (
     `<div class="dim-edit">` +
     `<label class="e-field e-wide"><span>Converted text</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
+    `<div class="e-size e-wide"><span>Text size</span>` +
+    `<button type="button" class="btn small e-size-dn" title="Smaller" aria-label="Smaller text"${size <= SIZE_MIN ? ' disabled' : ''}>−</button>` +
+    `<span class="e-size-val">${Math.round(size * 100)}%</span>` +
+    `<button type="button" class="btn small e-size-up" title="Larger" aria-label="Larger text"${size >= SIZE_MAX ? ' disabled' : ''}>+</button></div>` +
     `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>` +
     `<div class="e-actions">${t?.offset ? '<button class="btn small e-moveback">Move text back</button>' : ''}` +
-    `${d.override ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
+    `${d.override || size !== 1 ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
     `</div>`
   );
+}
+
+/** Text size steps in the dimension list (10% each, 50% to 300%). */
+const SIZE_MIN = 0.5;
+const SIZE_MAX = 3;
+
+/**
+ * Makes the converted text holding dimension `id` larger or smaller by one
+ * step, and converts the dimension if it is not yet.
+ */
+function stepSize(id: string, dir: 1 | -1): void {
+  const d = state.dims.find((x) => x.id === id);
+  const t = d && textOf(d.textId);
+  if (!d || !t) return;
+  const next = Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(((t.sizeScale ?? 1) + dir * 0.1) * 10) / 10));
+  snapshot();
+  t.sizeScale = next === 1 ? undefined : next;
+  if (!d.converted) convert(d, state.settings);
+  renderDynamic();
 }
 
 /** Applies an edit to one dimension and converts it with it. */
@@ -568,55 +590,10 @@ svg.addEventListener('pointerleave', () => {
   pointer = null;
   if (!moving) updateHandles();
 });
-/** A drawn box being turned with its rotate handle. */
-let rotating: { text: TextEntity; c: Pt; a0: number; delta: number; id: number; preview: SVGGElement } | null = null;
-
-/** Pointer position in drawing coordinates (SVG y is the negated drawing y). */
-function pointerDrawing(ev: PointerEvent): Pt {
-  const p = clientToSvg(ev.clientX, ev.clientY);
-  return { x: p.x, y: -p.y };
-}
-
-/** Box angle after turning by `delta`: close to upright or sideways snaps there; Shift turns in 15° steps. */
-function snapTurn(start: number, delta: number, shift: boolean): number {
-  const a = start + delta;
-  const step = shift ? Math.PI / 12 : Math.PI / 2;
-  const snapped = Math.round(a / step) * step;
-  return (shift || Math.abs(a - snapped) < (3 * Math.PI) / 180 ? snapped : a) - start;
-}
-
-function drawRotatePreview(r: NonNullable<typeof rotating>): void {
-  const cover = rotatePoly(r.text.cover!, r.delta);
-  const deg = Math.round(((((polyAngle(cover) * 180) / Math.PI) % 360) + 540) % 360) - 180;
-  const { p, angle } = rotateHandlePoint(cover);
-  r.preview.innerHTML =
-    `<polygon points="${cover.map((q) => `${q.x},${q.y}`).join(' ')}"/>` +
-    rotateHandleSvg(r.text.id, cover, ' near') +
-    `<g transform="translate(${p.x} ${p.y}) rotate(${(angle * 180) / Math.PI})"><g class="handle-in"><text x="12" y="-18" transform="scale(1 -1)">${deg}°</text></g></g>`;
-}
-
 svg.addEventListener('pointerdown', (ev) => {
   // a tap (touch screens have no hover) shows the handles near it
   pointer = clientToSvg(ev.clientX, ev.clientY);
   updateHandles();
-  const rot = (ev.target as Element).closest?.('.handle.near[data-rotate]') as SVGElement | null;
-  if (rot && ev.button === 0) {
-    const t = textOf(rot.dataset.rotate!);
-    if (t?.cover?.length === 4) {
-      ev.preventDefault();
-      const c = polyCentre(t.cover);
-      const p = pointerDrawing(ev);
-      const preview = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-      preview.setAttribute('class', 'rot-preview');
-      overlayLayer.appendChild(preview);
-      rotating = { text: t, c, a0: Math.atan2(p.y - c.y, p.x - c.x), delta: 0, id: ev.pointerId, preview };
-      drawRotatePreview(rotating);
-      svg.setPointerCapture(ev.pointerId);
-      svg.classList.add('rotating');
-      updateHandles();
-      return;
-    }
-  }
   const handle = (ev.target as Element).closest?.('.handle.near[data-handle]') as SVGElement | null;
   if (handle && ev.button === 0) {
     const t = textOf(handle.dataset.handle!);
@@ -643,15 +620,6 @@ svg.addEventListener('pointerdown', (ev) => {
 });
 svg.addEventListener('pointermove', (ev) => {
   pointer = clientToSvg(ev.clientX, ev.clientY);
-  if (rotating && rotating.id === ev.pointerId) {
-    const p = pointerDrawing(ev);
-    const a = Math.atan2(p.y - rotating.c.y, p.x - rotating.c.x);
-    let delta = a - rotating.a0;
-    delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // -180°..180°
-    rotating.delta = snapTurn(polyAngle(rotating.text.cover!), delta, ev.shiftKey);
-    drawRotatePreview(rotating);
-    return;
-  }
   if (!moving && !pick && !drag?.moved) updateHandles();
   if (moving && moving.id === ev.pointerId) {
     const p = clientToSvg(ev.clientX, ev.clientY);
@@ -690,16 +658,6 @@ svg.addEventListener('pointermove', (ev) => {
   applyView();
 });
 svg.addEventListener('pointerup', (ev) => {
-  if (rotating && rotating.id === ev.pointerId) {
-    const r = rotating;
-    rotating = null;
-    r.preview.remove();
-    svg.classList.remove('rotating');
-    updateHandles();
-    // read the text again in the turned box (a tiny turn is a slip)
-    if (Math.abs(r.delta) > (0.5 * Math.PI) / 180) void placeBox(rotatePoly(r.text.cover!, r.delta), r.text);
-    return;
-  }
   if (moving && moving.id === ev.pointerId) {
     const m = moving;
     moving = null;
@@ -730,11 +688,6 @@ svg.addEventListener('pointerup', (ev) => {
   else toggleDimension(target.dataset.dim);
 });
 svg.addEventListener('pointercancel', () => {
-  if (rotating) {
-    rotating.preview.remove();
-    rotating = null;
-    svg.classList.remove('rotating');
-  }
   moving = null;
   pointer = null;
   updateHandles();
@@ -846,10 +799,17 @@ $('dim-list').addEventListener('click', (ev) => {
     }
     return;
   }
+  if (target.closest('.e-size-up, .e-size-dn')) {
+    stepSize(id, target.closest('.e-size-up') ? 1 : -1);
+    return;
+  }
   if (target.closest('.e-reset')) {
+    const t = textOf(state.dims.find((x) => x.id === id)?.textId ?? '');
+    // editDimension takes the undo snapshot before calling this
     editDimension(id, (o) => {
       delete o.text;
       delete o.diameter;
+      if (t) t.sizeScale = undefined;
     });
     return;
   }
@@ -893,15 +853,15 @@ interface Snapshot {
   entities: Entity[];
   dims: Dimension[];
   used: Map<string, ConversionSettings>;
-  /** Where converted texts had been moved to. */
-  offsets: Map<TextEntity, Pt | undefined>;
+  /** Where converted texts had been moved to, and their size. */
+  offsets: Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined }>;
 }
 const undoStack: Snapshot[] = [];
 function snapshot(): void {
   const d = state.drawing;
   if (!d) return;
-  const offsets = new Map<TextEntity, Pt | undefined>();
-  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, e.offset);
+  const offsets = new Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined }>();
+  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, { offset: e.offset, sizeScale: e.sizeScale });
   undoStack.push({ entities: [...d.entities], dims: state.dims.map((x) => ({ ...x })), used: new Map(state.used), offsets });
   if (undoStack.length > 50) undoStack.shift();
 }
@@ -909,7 +869,10 @@ function undo(): void {
   const s = undoStack.pop();
   const d = state.drawing;
   if (!s || !d) return;
-  for (const [t, o] of s.offsets) t.offset = o;
+  for (const [t, o] of s.offsets) {
+    t.offset = o.offset;
+    t.sizeScale = o.sizeScale;
+  }
   d.entities = s.entities;
   state.dims = s.dims;
   state.used = s.used;
@@ -1038,16 +1001,12 @@ async function readBoxText(d: Drawing, poly: Pt[]): Promise<{ text: string; plac
 }
 
 /** Asks the user to confirm or type the text of a box. Resolves null on cancel. */
-function askBoxText(read: string | null, previous?: string): Promise<string | null> {
+function askBoxText(read: string | null): Promise<string | null> {
   const dlg = $<HTMLDialogElement>('box-dialog');
   const input = $<HTMLInputElement>('box-text');
   $('box-read').textContent =
-    read !== null
-      ? 'Read from the drawing. Correct it if needed.'
-      : previous !== undefined
-        ? 'Nothing could be read in the turned box. This is the text it had: correct it if needed.'
-        : 'Nothing could be read in the box. Type the value as it appears on the drawing.';
-  input.value = read ?? previous ?? '';
+    read === null ? 'Nothing could be read in the box. Type the value as it appears on the drawing.' : 'Read from the drawing. Correct it if needed.';
+  input.value = read ?? '';
   // Ø is not on most keyboards
   $('box-dia').onclick = () => {
     const a = input.selectionStart ?? input.value.length;
@@ -1080,12 +1039,8 @@ async function addBox(box: Box): Promise<void> {
   await placeBox(boxPoly(box));
 }
 
-/**
- * Reads the text in a box (any angle), asks the user to confirm it and adds
- * it. `replacing` is a box being turned: it is taken out, its text is offered
- * when nothing is read, and a conversion it had is redone.
- */
-async function placeBox(poly: Pt[], replacing?: TextEntity): Promise<void> {
+/** Reads the text in a box, asks the user to confirm it and adds it. */
+async function placeBox(poly: Pt[]): Promise<void> {
   const d = state.drawing;
   if (!d) return;
   let read: Awaited<ReturnType<typeof readBoxText>> = null;
@@ -1099,18 +1054,15 @@ async function placeBox(poly: Pt[], replacing?: TextEntity): Promise<void> {
       busy(null);
     }
   }
-  const typed = await askBoxText(read?.text ?? null, replacing?.text);
+  const typed = await askBoxText(read?.text ?? null);
   if (typed === null) return;
   // AutoCAD's code for the diameter sign, as some users type it
   const text = typed.replace(/%%c/gi, '\u00d8');
-  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, poly, replacing?.style.color);
+  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, poly);
   // written like the letters in the box (or, when none were read, like the page's other text)
-  Object.assign(t, read?.style ?? (replacing ? { face: replacing.face, hscale: replacing.hscale, slant: replacing.slant } : pageStyle(d)) ?? {});
+  Object.assign(t, read?.style ?? pageStyle(d) ?? {});
   if (t.face) t.width = advance(getFace(t.face), text) * t.fontSize * (t.hscale ?? 1);
-  // a box being turned: its old self goes, with its values
-  const oldDims = replacing ? state.dims.filter((x) => x.textId === replacing.id) : [];
-  const base = replacing ? { ...d, entities: d.entities.filter((e) => e.id !== replacing.id) } : d;
-  const edit = addBoxedText(base, state.dims.filter((x) => !oldDims.includes(x)), poly, t, customSuffix());
+  const edit = addBoxedText(d, state.dims, poly, t, customSuffix());
   const added = edit.dims.filter((x) => x.textId === t.id);
   if (!added.length) {
     const c = state.settings.custom;
@@ -1128,21 +1080,6 @@ async function placeBox(poly: Pt[], replacing?: TextEntity): Promise<void> {
   state.dims = edit.dims;
   for (const id of edit.replaced) state.used.delete(id);
   addCustomDimensions(); // "12 u" boxed: the custom suffix belongs to the value
-  // a turned box that was converted stays converted, with the same settings
-  const was = oldDims.find((x) => x.converted);
-  if (was) {
-    const used = state.used.get(was.id) ?? state.settings;
-    for (const x of state.dims.filter((y) => y.textId === t.id)) convert(x, used);
-  }
-  for (const x of oldDims) state.used.delete(x.id);
-  if (replacing) {
-    d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
-    renderStatic();
-    renderDynamic();
-    const deg = Math.round(((((polyAngle(poly) * 180) / Math.PI) % 360) + 360) % 360);
-    toast(`Turned the box to ${deg > 180 ? deg - 360 : deg}°.`, false, 6000, { label: 'Undo', run: undo });
-    return;
-  }
   d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
   renderStatic();
   renderDynamic();
@@ -1153,6 +1090,10 @@ async function placeBox(poly: Pt[], replacing?: TextEntity): Promise<void> {
 window.addEventListener('keydown', (ev) => {
   if ((ev.target as HTMLElement).closest?.('input, select, textarea, dialog')) return;
   if (ev.key === 'Escape') setMode('convert');
+  else if (ev.key === 'PageDown' || ev.key === 'PageUp') {
+    ev.preventDefault();
+    turnPage(ev.key === 'PageDown' ? 1 : -1);
+  }
   else if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
     ev.preventDefault();
     undo();
@@ -1276,17 +1217,24 @@ $<HTMLInputElement>('highlight').addEventListener('change', (ev) => {
   renderDynamic();
 });
 
-$<HTMLSelectElement>('page-select').addEventListener('change', (ev) => {
-  if (state.file) void openFile(state.file, Number((ev.target as HTMLSelectElement).value));
-});
+/** Goes to the page `step` pages on (−1 back, 1 on). */
+function turnPage(step: number): void {
+  const p = state.drawing?.pdf;
+  if (!state.file || !p) return;
+  const next = p.pageIndex + step;
+  if (next < 0 || next >= p.pageCount) return;
+  void openFile(state.file, next);
+}
+$('page-prev').addEventListener('click', () => turnPage(-1));
+$('page-next').addEventListener('click', () => turnPage(1));
 
 // ------------------------------------------------------------------ export
 
 $('export-dxf').addEventListener('click', () => {
   const d = state.drawing;
   if (!d) return;
-  const moved = d.entities.some((e) => e.kind === 'text' && !!e.offset);
-  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was moved, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
+  const moved = d.entities.some((e) => e.kind === 'text' && (!!e.offset || (e.sizeScale ?? 1) !== 1));
+  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was moved or resized, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
   else if (d.source !== 'pdf' && d.dxf?.hasHandles) {
     try {
       download(patchDxf(d, state.dims), `${baseName()}-converted.dxf`, 'application/dxf');

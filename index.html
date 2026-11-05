@@ -16,7 +16,6 @@
       <label class="btn primary" for="file-input">Open drawing…</label>
       <input id="file-input" type="file" accept=".pdf,.dxf,.dwg,application/pdf" hidden />
       <span id="file-name" class="file-name"></span>
-      <select id="page-select" hidden aria-label="PDF page"></select>
       <div class="spacer"></div>
       <div class="export" role="group" aria-label="Download">
         <span class="export-label">Download</span>
@@ -52,6 +51,11 @@
         <div id="busy" class="busy" hidden>
           <div class="row-inline"><div class="spinner"></div><span id="busy-text">Reading drawing…</span></div>
           <div class="progress" id="busy-progress" hidden><div id="busy-bar"></div></div>
+        </div>
+        <div class="pager" id="pager" role="group" aria-label="PDF page" hidden>
+          <button class="btn icon" id="page-prev" title="Previous page" aria-label="Previous page"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <span id="page-num" aria-live="polite"></span>
+          <button class="btn icon" id="page-next" title="Next page" aria-label="Next page"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </div>
         <div id="toast" class="toast" hidden></div>
       </section>
