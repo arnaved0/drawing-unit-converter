@@ -57,58 +57,28 @@
         <div id="toast" class="toast" hidden></div>
       </section>
 
-      <aside class="panel" aria-label="Conversion settings">
+      <aside class="panel" aria-label="Conversion">
         <section>
-          <h2>Convert to</h2>
+          <div class="panel-head">
+            <h2>Units</h2>
+            <button id="open-settings" class="btn small" type="button" title="Number format, PDF text and display settings">
+              <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+              Settings
+            </button>
+          </div>
           <label class="field">
-            <span>Unit</span>
+            <span>Original unit</span>
+            <select id="source-unit">
+              <option value="mm">Millimetres (mm)</option><option value="cm">Centimetres (cm)</option><option value="m">Metres (m)</option><option value="in">Inches (in)</option><option value="ft">Feet (ft)</option>
+            </select>
+          </label>
+          <div class="to" aria-hidden="true">to</div>
+          <label class="field">
+            <span>New unit</span>
             <select id="target"></select>
           </label>
-          <label class="field" id="decimals-field">
-            <span>Decimal places</span>
-            <select id="decimals">
-              <option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
-            </select>
-          </label>
-          <label class="field" id="denominator-field" hidden>
-            <span>Round to</span>
-            <select id="denominator">
-              <option value="2">1/2"</option><option value="4">1/4"</option><option value="8">1/8"</option><option value="16">1/16"</option><option value="32">1/32"</option><option value="64">1/64"</option>
-            </select>
-          </label>
-          <label class="check"><input type="checkbox" id="show-unit" /> Add unit label</label>
-          <label class="field" id="inch-field">
-            <span>Inch label</span>
-            <select id="inch-label"><option value="in">in</option><option value="&quot;">"</option></select>
-          </label>
-          <label class="check"><input type="checkbox" id="trim-zeros" /> Drop trailing zeros</label>
           <p class="example" id="example"></p>
-        </section>
-
-        <section>
-          <h2>Drawing units</h2>
-          <label class="field">
-            <span>Values without a unit are in</span>
-            <select id="source-unit">
-              <option value="mm">mm</option><option value="cm">cm</option><option value="m">m</option><option value="in">in</option><option value="ft">ft</option>
-            </select>
-          </label>
           <p class="hint" id="source-hint"></p>
-        </section>
-
-        <section>
-          <h2>PDF text</h2>
-          <label class="check"><input type="checkbox" id="ocr-first" checked /> Read text with Scan &amp; OCR first</label>
-          <p class="hint">Turns text that is drawn as outlines or scanned into real text before the dimensions are found. Takes about 15 s per page; the text recogniser (21 MB) downloads once.</p>
-          <button id="ocr-again" class="btn" hidden>Open the PDF again</button>
-        </section>
-
-        <section>
-          <div class="row">
-            <button id="convert-all" class="btn primary" disabled>Convert all</button>
-            <button id="reset-all" class="btn" disabled>Reset all</button>
-          </div>
-          <label class="check"><input type="checkbox" id="highlight" checked /> Highlight dimensions</label>
         </section>
 
         <section>
@@ -121,10 +91,19 @@
           <p class="hint" id="box-hint">Click a box to convert its value. Right-drag to pan.</p>
         </section>
 
+        <section>
+          <div class="row">
+            <button id="convert-all" class="btn primary" disabled>Convert all</button>
+            <button id="reset-all" class="btn" disabled>Reset all</button>
+          </div>
+        </section>
+
         <section class="grow">
-          <h2>Dimensions <span id="dim-count" class="count"></span></h2>
-          <p class="hint" id="dim-hint">Open a drawing to list its dimensions.</p>
-          <ul id="dim-list" class="dim-list"></ul>
+          <details id="dims-panel" open>
+            <summary><h2>Dimensions <span id="dim-count" class="count"></span></h2></summary>
+            <p class="hint" id="dim-hint">Open a drawing to list its dimensions.</p>
+            <ul id="dim-list" class="dim-list"></ul>
+          </details>
         </section>
 
         <section>
@@ -135,6 +114,44 @@
           </details>
         </section>
       </aside>
+
+      <dialog id="settings-dialog" class="dialog settings">
+        <form method="dialog">
+          <h3>Settings</h3>
+
+          <h4>Number format</h4>
+          <label class="field" id="decimals-field">
+            <span>Decimal places</span>
+            <select id="decimals">
+              <option value="0">0</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+            </select>
+          </label>
+          <label class="field" id="denominator-field" hidden>
+            <span>Round fractions to</span>
+            <select id="denominator">
+              <option value="2">1/2"</option><option value="4">1/4"</option><option value="8">1/8"</option><option value="16">1/16"</option><option value="32">1/32"</option><option value="64">1/64"</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="show-unit" /> Add unit label</label>
+          <label class="field" id="inch-field">
+            <span>Inch label</span>
+            <select id="inch-label"><option value="in">in</option><option value="&quot;">"</option></select>
+          </label>
+          <label class="check"><input type="checkbox" id="trim-zeros" /> Drop trailing zeros</label>
+
+          <h4>PDF text</h4>
+          <label class="check"><input type="checkbox" id="ocr-first" checked /> Read text with Scan &amp; OCR first</label>
+          <p class="hint">Turns text that is drawn as outlines or scanned into real text before the dimensions are found. Takes about 15 s per page; the text recogniser (21 MB) downloads once.</p>
+          <button id="ocr-again" class="btn" type="button" hidden>Open the PDF again with this setting</button>
+
+          <h4>Display</h4>
+          <label class="check"><input type="checkbox" id="highlight" checked /> Highlight boxes</label>
+
+          <div class="row">
+            <button value="close" class="btn primary">Done</button>
+          </div>
+        </form>
+      </dialog>
     </main>
     <dialog id="box-dialog" class="dialog">
       <form method="dialog">
