@@ -5,7 +5,7 @@
 import { displayColor } from '../aci';
 import { bulgeArc, insertMatrix, textCorners, type Mat } from '../geom';
 import type { Dimension, DisplayText } from '../dimensions';
-import { displayText, isStandaloneDimension } from '../dimensions';
+import { displayText, isStandaloneDimension, replaceStart } from '../dimensions';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity, Vertex } from '../model';
 import { advance, getFace } from '../fonts/faces';
 
@@ -184,7 +184,7 @@ export interface OcrPatch {
 export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
   const conv = dims.filter((d) => d.converted);
   if (!conv.length) return null;
-  const cut = Math.min(...conv.map((d) => d.start));
+  const cut = Math.min(...conv.map((d) => replaceStart(d, t.text)));
   const lay = layoutText(t, dims);
   if (cut === 0 || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
   // where the value starts: the width of the text before it, in the text's own font

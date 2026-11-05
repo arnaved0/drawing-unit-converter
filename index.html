@@ -156,8 +156,13 @@
       <form method="dialog">
         <h3>Add a dimension box</h3>
         <p id="box-read" class="hint"></p>
-        <label class="field"><span>Text in the box</span><input id="box-text" type="text" autocomplete="off" spellcheck="false" /></label>
-        <p class="hint">Include the unit if the drawing shows one, for example <code>88.9</code>, <code>R 25.4mm</code> or <code>Dia 22.3mm</code>.</p>
+        <label class="field"><span>Text in the box</span>
+          <span class="input-sym">
+            <input id="box-text" type="text" autocomplete="off" spellcheck="false" />
+            <button type="button" id="box-dia" class="btn small" title="Insert the diameter sign" aria-label="Insert the diameter sign Ø">Ø</button>
+          </span>
+        </label>
+        <p class="hint">Include the unit if the drawing shows one, for example <code>88.9</code>, <code>R 25.4mm</code>, <code>Ø12</code> or <code>Dia 22.3mm</code>.</p>
         <div class="row">
           <button value="cancel" class="btn" formnovalidate>Cancel</button>
           <button value="ok" class="btn primary">Add box</button>

@@ -55,7 +55,7 @@ function advances(f: Face): Map<string, number> {
 export function faceChar(f: Face, ch: string): string | null {
   const a = advances(f);
   if (a.has(ch)) return ch;
-  const alt = ch === '\u2300' || ch === '\u03a6' ? '\u00d8' : ch === '\u2033' ? '"' : ch === '\u2032' ? "'" : ch === '\u2212' ? '-' : null;
+  const alt = /[\u2300\u2205\u03a6\u03c6]/.test(ch) ? '\u00d8' : ch === '\u2033' ? '"' : ch === '\u2032' ? "'" : ch === '\u2212' ? '-' : null;
   return alt && a.has(alt) ? alt : null;
 }
 

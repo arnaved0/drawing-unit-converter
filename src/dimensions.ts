@@ -46,6 +46,29 @@ export interface DimensionOverride {
   suffix?: string;
   /** Text typed by the user: used as the converted text as it is. */
   text?: string;
+  /** Diameter sign in front of the converted value: true = add it, false = take it out. */
+  diameter?: boolean;
+}
+
+/** A diameter sign (and one space) right before position `at` of `text`, or null. */
+export function diameterSignBefore(text: string, at: number): { start: number; sign: string } | null {
+  const m = /(?:[\u00d8\u00f8\u2300\u2205\u03c6\u03a6]|%%c)\s?$/i.exec(text.slice(Math.max(0, at - 4), at));
+  return m ? { start: at - m[0].length, sign: m[0] } : null;
+}
+
+/** True when the value of `d` is written with a diameter sign. */
+export function hasDiameterSign(d: { start: number }, text: string): boolean {
+  return !!diameterSignBefore(text, d.start);
+}
+
+/**
+ * Where the text a conversion replaces starts. Normally at the value; when the
+ * user chose to add or take out the diameter sign, a sign before the value is
+ * replaced too.
+ */
+export function replaceStart(d: Dimension, text: string): number {
+  if (d.override?.diameter === undefined) return d.start;
+  return diameterSignBefore(text, d.start)?.start ?? d.start;
 }
 
 const UNIT_RE = /^(\s?)(mm|cm|m|inches|inch|in\.?|"|\u201d|\u2033|ft\.?|feet|'|\u2019|\u2032)(?![a-z])/;
@@ -55,14 +78,17 @@ const UNIT_OF: Record<string, LengthUnit> = {
 };
 const PIPE_THREAD_RE = /^\s?-?\s?(NPTF?|NPSM?|BSPP?|BSPT|UNE?F|UNC|UN|G\d)/i;
 const DEGREE_RE = /^\s?(\u00b0|\u00ba|%%d|deg\b)/i;
-/** What may remain around the numbers of a text that is "just a dimension". */
+/**
+ * What may remain around the numbers of a text that is "just a dimension".
+ * Diameter signs: Ø, ⌀, ∅, φ, Φ, ø and AutoCAD's %%c; after one, a fit class ("Ø30 H7").
+ */
 const STANDALONE_RE =
-  /^(?:\s|S?R\b|S?R(?=\s|=|$)|\u00d8|\u2300|\u03c6|\u03a6|%%c|DIA\.?|D(?=\s|=|:)|=|:|\uff1a|\(|\)|\[|\]|<|>|\u2264|\u2265|\u00b1|~|\u2248|X\s?\d+|\d+\s?X|\d+\s?PL(?:CS)?\.?|TYP\.?|REF\.?|MAX\.?|MIN\.?|THRU|EQ\.?\s?SP\.?)*$/i;
+  /^(?:\s|S?R\b|S?R(?=\s|=|$)|\u00d8|\u00f8|\u2300|\u2205|\u03c6|\u03a6|%%c|DIA\.?|D(?=\s|=|:)|=|:|\uff1a|\(|\)|\[|\]|<|>|\u2264|\u2265|\u00b1|~|\u2248|X\s?\d+|\d+\s?X|\d+\s?PL(?:CS)?\.?|TYP\.?|REF\.?|MAX\.?|MIN\.?|THRU|EQ\.?\s?SP\.?|DEEP|(?<=[\u00d8\u2300\u2205\u03c6\u03a6]\s?\d*\s?)[A-HJKMNP-Za-hjkmnp-z]{1,2}\d{1,2}(?:\/[A-HJKMNP-Za-hjkmnp-z]{1,2}\d{1,2})?)*$/i;
 
 function kindFromPrefix(before: string): DimKind {
   const tail = before.slice(-8);
   if (/(?:^|[^A-Za-z])S?R\s*[=:]?\s*$/.test(tail)) return 'radius';
-  if (/(\u00d8|\u2300|\u03c6|\u03a6|%%c|dia\.?|(?:^|[^A-Za-z])D)\s*[=:\uff1a]?\s*$/i.test(tail)) return 'diameter';
+  if (/(\u00d8|\u00f8|\u2300|\u2205|\u03c6|\u03a6|%%c|dia\.?|(?:^|[^A-Za-z])D)\s*[=:\uff1a]?\s*$/i.test(tail)) return 'diameter';
   return 'linear';
 }
 
@@ -88,7 +114,7 @@ function scan(text: string): Candidate[] {
       if (/^[xX]$/.test(word)) {
         // "100x50" is a size (both lengths); "X8" is a count.
         if (!/\d\s?$/.test(before.slice(0, -1))) continue;
-      } else if (!/^(S?R|dia)$/i.test(word)) continue; // M6, PN12, REV3 ...
+      } else if (!/^(S?R|dia)$/i.test(word) && !/%%c$/i.test(before)) continue; // M6, PN12, REV3 ... (not %%c12, AutoCAD's Ø12)
     }
     if (prev === '\u00d7' && !/\d\s?$/.test(before.slice(0, -1))) continue;
     let rest = text.slice(e);
@@ -196,11 +222,13 @@ export function detectDimensions(drawing: Drawing): Dimension[] {
 /** Text that replaces dimension `d` under `settings` (its own overrides applied). */
 export function replacementText(d: Dimension, fullText: string, s: ConversionSettings, defaultUnit: LengthUnit): string {
   const o = d.override ?? {};
-  if (o.text !== undefined) return o.text;
+  // the sign in front, when the user chose to add it (or keep it while it is replaced with the value)
+  const sign = o.diameter === true ? (diameterSignBefore(fullText, d.start)?.sign ?? '\u00d8') : '';
+  if (o.text !== undefined) return o.text.startsWith(sign.trim()) ? o.text : sign + o.text;
   const settings = o.decimals !== undefined ? { ...s, decimals: o.decimals } : s;
   const mm = toMm(d.value, d.unit ?? defaultUnit);
   const f = formatLength(mm, settings);
-  let out = d.comma ? f.number.replace('.', ',') : f.number;
+  let out = sign + (d.comma ? f.number.replace('.', ',') : f.number);
   if (d.noLabel && o.suffix === undefined) return out;
   // a suffix chosen for this dimension replaces the label ('' = none)
   const label = o.suffix !== undefined ? o.suffix : f.label;
@@ -232,7 +260,8 @@ export function displayText(original: string, dims: Dimension[]): DisplayText {
   let pos = 0;
   let changed = false;
   for (const d of sorted) {
-    out += original.slice(pos, d.start);
+    const from = d.converted ? Math.max(pos, replaceStart(d, original)) : d.start;
+    out += original.slice(pos, from);
     const rep = d.converted ? d.converted.text : original.slice(d.start, d.end);
     if (d.converted) changed = true;
     ranges.set(d.id, { start: out.length, end: out.length + rep.length });

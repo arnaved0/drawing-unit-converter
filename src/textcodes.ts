@@ -131,7 +131,7 @@ export function encodeR12Text(s: string): string {
   let out = '';
   // NFKC turns full-width punctuation and digits ("Dia：") into ASCII.
   for (const ch of s.normalize('NFKC')) {
-    if (ch === '\u00d8' || ch === '\u2300') out += '%%c';
+    if (/[\u00d8\u2300\u2205]/.test(ch)) out += '%%c';
     else if (ch === '\u00b0') out += '%%d';
     else if (ch === '\u00b1') out += '%%p';
     else if (ch === '%') out += '%%%';

@@ -261,6 +261,42 @@ def sample_arc_element():
     c.save()
 
 
+def sample_shaft():
+    """A stepped shaft with diameter callouts written in the ways drawings do."""
+    c = canvas.Canvas(os.path.join(OUT, "shaft-diameters.pdf"), pagesize=landscape(A3))
+    c.setStrokeColorRGB(*BLACK)
+    c.setLineWidth(0.8)
+    # stepped shaft: (x0, x1, half height)
+    steps = [(200, 330, 30), (330, 560, 48), (560, 760, 38), (760, 900, 22)]
+    cy = 450
+    for x0, x1, h in steps:
+        c.rect(x0, cy - h, x1 - x0, 2 * h, stroke=1, fill=0)
+    c.setDash([12, 3, 2, 3])
+    c.setLineWidth(0.3)
+    c.line(180, cy, 920, cy)
+    c.setDash([])
+    # vertical diameter dimensions on each step (text along the dimension line)
+    dim_line(c, 265, cy - 30, 265, cy + 30, "\u00d860", offset=0)
+    dim_line(c, 445, cy - 48, 445, cy + 48, "\u00d8 96.5", offset=0)
+    dim_line(c, 660, cy - 38, 660, cy + 38, "\u00d876.2mm", offset=0, color=RED)
+    dim_line(c, 830, cy - 22, 830, cy + 22, "\u00d844", offset=0)
+    # lengths
+    dim_line(c, 200, cy - 48, 560, cy - 48, "360", offset=-40)
+    dim_line(c, 200, cy - 48, 900, cy - 48, "700", offset=-70)
+    # holes and notes
+    for x in (380, 510):
+        c.circle(x, cy + 20, 6, stroke=1, fill=0)
+    leader(c, [(386, cy + 26), (420, cy + 110), (470, cy + 110)])
+    label(c, 475, cy + 107, "2X \u00d812 THRU")
+    leader(c, [(900, cy + 22), (940, cy + 90), (990, cy + 90)])
+    label(c, 995, cy + 87, "\u00d80.75 THRU", size=9)
+    label(c, 600, cy + 130, "\u00d830 H7", size=11, color=BLUE)
+    label(c, 960, 300, "Bore \u00d822.3mm", rot=-30, color=BLUE)
+    label(c, 200, 220, "Shaft \u00d860 to \u00d844 stepped")
+    label(c, 200, 205, "Length in mm")
+    c.save()
+
+
 DIMOVR = {"dimtxt": 2.5, "dimasz": 2.5, "dimexe": 1.25, "dimexo": 0.625, "dimlfac": 1, "dimdec": 1}
 
 
@@ -290,8 +326,11 @@ def sample_dxf():
 
 
 if __name__ == "__main__":
-    sample_defrost_heater()
-    sample_flange_heater()
-    sample_arc_element()
-    sample_dxf()
+    import sys
+
+    # one sample by name (python scripts/make_samples.py shaft), or all of them
+    only = sys.argv[1:]
+    for name, fn in [("defrost", sample_defrost_heater), ("flange", sample_flange_heater), ("arc", sample_arc_element), ("shaft", sample_shaft), ("dxf", sample_dxf)]:
+        if not only or name in only:
+            fn()
     print("samples written to", os.path.abspath(OUT))

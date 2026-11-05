@@ -31,7 +31,7 @@ import {
   LineJoinStyle,
 } from 'pdf-lib';
 import { displayColor } from '../aci';
-import type { Dimension } from '../dimensions';
+import { replaceStart, type Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
 import { coverPolygons, layoutText, movedPos, ocrPatch } from '../render/svg';
@@ -139,7 +139,8 @@ function winAnsiSafe(font: PDFFont, s: string): { text: string; lossy: boolean }
   let out = '';
   let lossy = false;
   for (const ch of s) {
-    const c = ch === '\u2300' ? '\u00d8' : ch;
+    // diameter look-alikes (⌀ ∅ Φ φ) are written as Ø, which every font has
+    const c = /[\u2300\u2205\u03a6\u03c6]/.test(ch) ? '\u00d8' : ch;
     try {
       font.encodeText(c);
       out += c;
@@ -214,7 +215,7 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
       // The line holds characters Helvetica lacks (CJK ...): replace only the values.
       const n = Math.max(1, t.text.length);
       for (const dim of list.filter((x) => x.converted)) {
-        const from = dim.start / n;
+        const from = replaceStart(dim, t.text) / n;
         const to = dim.end / n;
         polygon(page, textCorners(t, from - 0.02, to + 0.02).map((p) => apply(toUser, p)));
         const startD = textCorners(t, from, to)[0];

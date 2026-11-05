@@ -156,6 +156,10 @@ text.t { pointer-events: none; }
 .dim-edit input, .dim-edit select { font: inherit; font-size: 13px; color: var(--text); padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; background: #fff; min-width: 0; }
 .dim-edit .e-actions { grid-column: 1 / -1; display: flex; gap: 6px; justify-content: flex-end; }
 .dim-edit .e-actions:empty { display: none; }
+.dim-edit .e-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
+.dim-edit .e-check input { margin: 0; }
+.input-sym { display: flex; gap: 6px; }
+.input-sym input { flex: 1; min-width: 0; }
 
 /* move handles of converted text */
 /* shown only while the pointer is on or near the converted value (see updateHandles) */
