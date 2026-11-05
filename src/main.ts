@@ -1,7 +1,7 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { convertDimension, detectDimensions, findLengthTokens, replacementText, type Dimension } from './dimensions';
+import { convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
 import { addBoxedText, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
@@ -15,6 +15,7 @@ import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './
 import { matchFonts, normaliseOcrText, placeFit, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, type Face } from './fonts/faces';
 import { canvasRenderer } from './fonts/match';
+import { fixDiameters } from './ocr/diameter';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
 import { DEFAULT_SETTINGS, formatLength, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
@@ -393,8 +394,10 @@ function renderList(): void {
     if (t?.manual) li.classList.add('manual');
     if (d.override || t?.offset) li.classList.add('edited');
     if (open) li.classList.add('open');
-    li.querySelector('.orig')!.textContent = d.original;
-    if (d.converted) li.querySelector('.conv')!.textContent = d.converted.text;
+    // the diameter sign belongs to the value, even though only the number is replaced
+    const sign = t ? (diameterSignBefore(t.text, d.start)?.sign.trim() ?? '') : '';
+    li.querySelector('.orig')!.textContent = sign + d.original;
+    if (d.converted) li.querySelector('.conv')!.textContent = (sign && d.override?.diameter === undefined ? sign : '') + d.converted.text;
     li.querySelector('.ctx')!.textContent = ctx;
     li.title = t?.text ?? '';
     if (open) (li.querySelector('.e-text') as HTMLInputElement).value = d.converted?.text ?? previewText(d);
@@ -417,6 +420,8 @@ function previewText(d: Dimension): string {
 
 function editPanel(d: Dimension, t: TextEntity | undefined): string {
   const o = d.override ?? {};
+  // ticked when the converted value has the sign: the drawing's own, or one the user added
+  const dia = o.diameter ?? (!!t && hasDiameterSign(d, t.text));
   const dec = ['<option value="">Default</option>', ...[0, 1, 2, 3, 4].map((n) => `<option value="${n}"${o.decimals === n ? ' selected' : ''}>${n}</option>`)].join('');
   const suf = ['<option value="">Default</option>', ...SUFFIXES.map(([v, l]) => `<option value="${escHtml('=' + v)}"${o.suffix === v ? ' selected' : ''}>${escHtml(l)}</option>`)].join('');
   return (
@@ -424,6 +429,7 @@ function editPanel(d: Dimension, t: TextEntity | undefined): string {
     `<label class="e-field e-wide"><span>Converted text</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
     `<label class="e-field"><span>Decimals</span><select class="e-dec">${dec}</select></label>` +
     `<label class="e-field"><span>Suffix</span><select class="e-suf">${suf}</select></label>` +
+    `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>` +
     `<div class="e-actions">${t?.offset ? '<button class="btn small e-moveback">Move text back</button>' : ''}` +
     `${d.override ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
     `</div>`
@@ -462,6 +468,16 @@ $('dim-list').addEventListener('change', (ev) => {
       delete o.text;
       if (el.value === '') delete o.decimals;
       else o.decimals = Number(el.value);
+    });
+  } else if (el.classList.contains('e-dia')) {
+    const on = (el as HTMLInputElement).checked;
+    const d = state.dims.find((x) => x.id === id)!;
+    const t = textOf(d.textId);
+    const own = !!t && hasDiameterSign(d, t.text);
+    editDimension(id, (o) => {
+      // back to how the drawing writes it: no override
+      if (on === own) delete o.diameter;
+      else o.diameter = on;
     });
   } else if (el.classList.contains('e-suf')) {
     editDimension(id, (o) => {
@@ -742,6 +758,7 @@ $('dim-list').addEventListener('click', (ev) => {
       delete o.text;
       delete o.decimals;
       delete o.suffix;
+      delete o.diameter;
     });
     return;
   }
@@ -888,7 +905,7 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
     const scored = lines
       .map((l) => ({ l, text: normaliseOcrText(l.text) ?? l.text }))
       .sort((a, b) => Number(findLengthTokens(b.text, { isDimension: true }).length > 0) - Number(findLengthTokens(a.text, { isDimension: true }).length > 0) || b.l.confidence - a.l.confidence);
-    const best = scored[0];
+    const best = { ...scored[0] };
     const map = (x: number, y: number): [number, number] => {
       const [ux, uy] = vp.convertToPdfPoint(x + x0, y + y0) as number[];
       const p = apply(d.pdf!.userToDrawing, { x: ux, y: uy });
@@ -896,7 +913,14 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
     };
     // the font, size and width of the letters in the box, preferring the page's font
     await loadAllFaces();
-    const fit = matchFonts(img, [{ l: best.l, text: best.text }], fontRenderer, pageFamily(d))[0];
+    let fit = matchFonts(img, [{ l: best.l, text: best.text }], fontRenderer, pageFamily(d))[0];
+    // the recogniser has no Ø: put it back where the letters show one
+    const fix = fixDiameters(img, { l: best.l, text: best.text }, fit, pageFamily(d) ?? null, fontRenderer);
+    if (fix) {
+      best.text = fix.text;
+      best.l = { ...best.l, u: fix.box.u, len: fix.box.len, hgt: fix.box.hgt };
+      fit = fix.fit;
+    }
     const pl = fit ? placeFit(fit, map) : placeLine(best.l, map);
     const hex = '#' + best.l.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
     return {
@@ -917,6 +941,14 @@ function askBoxText(read: string | null): Promise<string | null> {
   $('box-read').textContent =
     read === null ? 'Nothing could be read in the box. Type the value as it appears on the drawing.' : 'Read from the drawing. Correct it if needed.';
   input.value = read ?? '';
+  // Ø is not on most keyboards
+  $('box-dia').onclick = () => {
+    const a = input.selectionStart ?? input.value.length;
+    const b = input.selectionEnd ?? a;
+    input.value = input.value.slice(0, a) + '\u00d8' + input.value.slice(b);
+    input.focus();
+    input.setSelectionRange(a + 1, a + 1);
+  };
   // Enter means "Add box" (the form's first button is Cancel)
   input.onkeydown = (ev) => {
     if (ev.key === 'Enter') {
@@ -951,8 +983,10 @@ async function addBox(box: Box): Promise<void> {
       busy(null);
     }
   }
-  const text = await askBoxText(read?.text ?? null);
-  if (text === null) return;
+  const typed = await askBoxText(read?.text ?? null);
+  if (typed === null) return;
+  // AutoCAD's code for the diameter sign, as some users type it
+  const text = typed.replace(/%%c/gi, '\u00d8');
   const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, box);
   // written like the letters in the box (or, when none were read, like the page's other text)
   Object.assign(t, read?.style ?? pageStyle(d) ?? {});

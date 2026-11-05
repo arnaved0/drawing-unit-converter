@@ -22,6 +22,12 @@ export interface OcrLine {
   u: P;
   len: number;
   hgt: number;
+  /**
+   * Readings of the same box in other directions. A Ø that the model cannot
+   * read can make a line look better upside down ("Ø60" -> "090"); the font
+   * matching checks these against the letter shapes.
+   */
+  alts?: { text: string; u: P; len: number; hgt: number }[];
 }
 
 export function buildCharset(dictText: string, numClasses: number): string[] {
@@ -216,7 +222,8 @@ export function cleanOcrText(s: string): string {
   t = t.replace(/(?<=\d)\.\s+(?=\d)/g, '. ');
   // "86:0°", "10:9mm": a colon inside a number is a misread decimal point
   t = t.replace(/(?<=\d)[:;](?=\d+\s?(?:°|mm|cm|in\b|"))/g, '.');
-  t = t.replace(/[Φφ⌀]/g, '\u00d8');
+  // the diameter sign has several look-alikes (the model has no Ø of its own)
+  t = t.replace(/[Φφ⌀∅]/g, '\u00d8').replace(/ø(?=\s?\d)/g, '\u00d8');
   return t;
 }
 
@@ -229,7 +236,7 @@ export interface OcrOptions {
  * Drafting convention: text reads from the bottom or from the right side of
  * the sheet, so a reading direction pointing down-the-page is unlikely.
  */
-function readable(u: P): boolean {
+export function readable(u: P): boolean {
   // reading angle in normal (y-up) terms: horizontal = 0°, bottom-to-top = 90°
   const deg = (Math.atan2(-u.y, u.x) * 180) / Math.PI;
   return deg > -75 && deg <= 105;
@@ -484,12 +491,14 @@ async function readBox(m: OcrModels, img: RGBAImage, rect: DetBox['rect'], allDi
   // conventional reading directions first; stop early on a confident read
   candidates.sort((a, b) => Number(readable(b.u)) - Number(readable(a.u)));
   let best: OcrLine | null = null;
+  const seen: { text: string; u: P; len: number; hgt: number; confidence: number }[] = [];
   for (const cand of candidates) {
     const d = { x: -cand.u.y, y: cand.u.x }; // glyph "down" for reading direction u (y-down image)
     const outW = Math.max(16, Math.min(1600, Math.round((REC_H * cand.len) / cand.hgt)));
     const strip = cropRotated(img, c, cand.u, d, cand.len, cand.hgt, outW, REC_H);
     const r = await recognise(m, strip);
     const score = r.confidence + (readable(cand.u) ? 0.08 : 0);
+    if (r.text.trim()) seen.push({ text: r.text, u: cand.u, len: cand.len, hgt: cand.hgt, confidence: r.confidence });
     if (r.text.trim() && (!best || score > best.confidence)) {
       best = { text: r.text, confidence: score, c, u: cand.u, len: cand.len, hgt: cand.hgt };
     }
@@ -501,5 +510,6 @@ async function readBox(m: OcrModels, img: RGBAImage, rect: DetBox['rect'], allDi
   const numeric = /^[\d.,\s]+$/.test(best.text.trim());
   const raw = best.confidence - (readable(best.u) ? 0.08 : 0);
   if (raw <= (numeric ? 0.5 : 0.55)) return null;
-  return { ...best, confidence: Math.min(1, raw), text: cleanOcrText(best.text) };
+  const alts = seen.filter((x) => x.u !== best!.u && x.confidence > 0.3).map(({ text, u, len, hgt }) => ({ text: cleanOcrText(text), u, len, hgt }));
+  return { ...best, confidence: Math.min(1, raw), text: cleanOcrText(best.text), ...(alts.length ? { alts } : {}) };
 }

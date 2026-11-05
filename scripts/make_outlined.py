@@ -114,8 +114,18 @@ FONT_SAMPLES = [
 
 
 if __name__ == "__main__":
+    import sys
+
+    only = sys.argv[1:]
     for n in ("defrost-heater", "flange-heater", "arc-element"):
-        outline(n)
-    for tag, path, wf in FONT_SAMPLES:
-        outline("defrost-heater", path, os.path.join("fonts", f"defrost-{tag}.pdf"), own_spacing=True, width_factor=wf)
+        if not only or n in only:
+            outline(n)
+    if not only or "fonts" in only:
+        for tag, path, wf in FONT_SAMPLES:
+            outline("defrost-heater", path, os.path.join("fonts", f"defrost-{tag}.pdf"), own_spacing=True, width_factor=wf)
+    # diameter symbols in the common lettering styles
+    if not only or "shaft" in only:
+        outline("shaft-diameters")
+        for tag, path, wf in [("osifont", FONT_SAMPLES[2][1], 1.0), ("tinos", FONT_SAMPLES[1][1], 1.0)]:
+            outline("shaft-diameters", path, os.path.join("fonts", f"shaft-{tag}.pdf"), own_spacing=True, width_factor=wf)
     _ = math

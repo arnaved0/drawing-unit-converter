@@ -5,7 +5,8 @@
 
 import type { FoundLine } from './worker';
 import { withTextLayers, type PlacedWord } from './textLayer';
-import { chooseFits, measureLine, scoreFaces, snappedBox, type Fit, type LineBox, type Measured, type RenderText, type RGBA } from '../fonts/match';
+import { fixDiameters } from './diameter';
+import { chooseFits, measureLine, plausible, scoreFaces, snappedBox, type Fit, type LineBox, type Measured, type RenderText, type RGBA } from '../fonts/match';
 import type { TextStyleHint } from '../importers/pdf';
 import type { Face } from '../fonts/faces';
 
@@ -41,7 +42,9 @@ const WIN_ANSI = /^[\x20-\x7e\u00a0-\u00ff\u20ac\u2013\u2014\u2018\u2019\u201c\u
 export function normaliseOcrText(s: string): string | null {
   const t = s
     .normalize('NFKC')
-    .replace(/[\u2300\u03a6\u03c6]/g, '\u00d8')
+    // diameter sign look-alikes; a lower-case ø only in front of a number
+    .replace(/[\u2300\u2205\u03a6\u03c6]/g, '\u00d8')
+    .replace(/\u00f8(?=\s?\d)/g, '\u00d8')
     // a label read together with the value below it: "C-Z11.2mm" -> "C-Z 11.2mm"
     // (not R25, D12, M6 or 100x50, where the letter belongs to the value)
     .replace(/(?<=[A-CE-LN-QS-WYZa-ce-ln-qs-wyz])(?=\d+(?:\.\d+)?\s?(?:mm|cm|in)\b)/g, ' ')
@@ -161,7 +164,18 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
 
   // the font of each line, so converted values can be written to look the same
   opts.onProgress?.(0.98, 'Matching the fonts');
-  const fits = opts.render ? matchFonts(pixels, kept, opts.render) : kept.map(() => null);
+  const matched = opts.render ? matchFontsFamily(pixels, kept, opts.render) : { fits: kept.map(() => null), family: null };
+  const fits = matched.fits;
+  // the recogniser has no Ø: put back the ones the letter shapes show
+  if (opts.render) {
+    kept.forEach((k, i) => {
+      const fix = fixDiameters(pixels, k, fits[i], matched.family, opts.render!);
+      if (!fix) return;
+      k.text = fix.text;
+      k.l = { ...k.l, u: fix.box.u, len: fix.box.len, hgt: fix.box.hgt };
+      fits[i] = fix.fit && plausible(fix.fit, fix.box) ? fix.fit : null;
+    });
+  }
   const styles: TextStyleHint[] = [];
   kept.forEach(({ l, text }, k) => {
     const fit = fits[k];
@@ -176,6 +190,11 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
 
 /** Face fits for OCR lines (null where the letters could not be measured). */
 export function matchFonts(img: RGBA, lines: { l: LineBox; text: string }[], render: RenderText, prefer?: Face['family']): (Fit | null)[] {
+  return matchFontsFamily(img, lines, render, prefer).fits;
+}
+
+/** matchFonts, and the font family chosen for the page. */
+export function matchFontsFamily(img: RGBA, lines: { l: LineBox; text: string }[], render: RenderText, prefer?: Face['family']): { fits: (Fit | null)[]; family: Face['family'] | null } {
   const measured = lines.map(({ l, text }) => {
     let best: { text: string; m: Measured; box: LineBox; fits: Fit[] } | null = null;
     // a box a few degrees off an axis is also tried on the axis; the better one counts
@@ -190,11 +209,11 @@ export function matchFonts(img: RGBA, lines: { l: LineBox; text: string }[], ren
     return best;
   });
   const ok = measured.filter((x): x is NonNullable<typeof x> => !!x);
-  const chosen = chooseFits(ok, render, prefer).fits;
+  const res = chooseFits(ok, render, prefer);
   const out: (Fit | null)[] = [];
   let k = 0;
-  for (const x of measured) out.push(x ? chosen[k++] : null);
-  return out;
+  for (const x of measured) out.push(x ? res.fits[k++] : null);
+  return { fits: out, family: res.family };
 }
 
 /** Text placement of a face fit: baseline start, advance vector and em vector, mapped through `map`. */

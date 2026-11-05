@@ -2,7 +2,7 @@
 // of converted TEXT/MTEXT entities and the text override of converted
 // DIMENSION entities change. Every other byte of the file stays as it was.
 
-import type { Dimension } from '../dimensions';
+import { replaceStart, type Dimension } from '../dimensions';
 import type { Drawing, TextEntity } from '../model';
 import { encodeDxfText } from '../textcodes';
 
@@ -70,7 +70,7 @@ export function patchDxf(d: Drawing, dims: Dimension[]): Uint8Array {
     let entry = textEdits.get(key);
     if (!entry) textEdits.set(key, (entry = { raw: t.dxf.raw, mtext: t.dxf.mtext, edits: [] }));
     for (const dim of list) {
-      const s = t.dxf.starts[dim.start];
+      const s = t.dxf.starts[replaceStart(dim, t.text)];
       const e = t.dxf.ends[dim.end - 1];
       if (s === undefined || e === undefined) throw new DxfPatchError('Text mapping is out of range.');
       entry.edits.push({ s, e, text: dim.converted!.text });
