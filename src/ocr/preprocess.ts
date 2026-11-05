@@ -5,6 +5,9 @@
 
 import type { FoundLine } from './worker';
 import { withTextLayers, type PlacedWord } from './textLayer';
+import { chooseFits, measureLine, scoreFaces, snappedBox, type Fit, type LineBox, type Measured, type RenderText, type RGBA } from '../fonts/match';
+import type { TextStyleHint } from '../importers/pdf';
+import type { Face } from '../fonts/faces';
 
 /** The parts of a pdf.js page this module needs. */
 interface PdfPage {
@@ -21,6 +24,8 @@ export interface PreprocessResult {
   alreadyText: number;
   /** Lines left out because the PDF font cannot hold their characters (CJK ...). */
   unsupported: number;
+  /** The face each added line was matched to (for importPdf's textStyles). */
+  styles: TextStyleHint[];
 }
 
 /** OCR box -> text placement. PP-OCR boxes are padded around the glyphs. */
@@ -106,6 +111,8 @@ export interface PreprocessOptions {
   recognise: (img: { width: number; height: number; data: Uint8ClampedArray }, pxPerMm: number) => Promise<FoundLine[]>;
   /** Creates a 2D canvas (document canvas in the browser, @napi-rs/canvas in tests). */
   createCanvas: (w: number, h: number) => { getContext(t: '2d', o?: unknown): any; width: number; height: number };
+  /** Draws text in the bundled faces; when set, each line's font is matched (see fonts/match.ts). */
+  render?: RenderText;
   onProgress?: (fraction: number, label: string) => void;
 }
 
@@ -124,12 +131,14 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
   const pxPerMm = scale * (72 / 25.4);
   const existing = await existingTextBoxes(page, vp);
 
-  const lines = await opts.recognise({ width: pixels.width, height: pixels.height, data: pixels.data }, pxPerMm);
+  // the worker takes the pixels over; font matching needs them afterwards
+  const lines = await opts.recognise({ width: pixels.width, height: pixels.height, data: opts.render ? pixels.data.slice() : pixels.data }, pxPerMm);
 
   const words: PlacedWord[] = [];
   let alreadyText = 0;
   let unsupported = 0;
   const toUser = (x: number, y: number) => vp.convertToPdfPoint(x, y) as [number, number];
+  const kept: { l: FoundLine; text: string }[] = [];
   for (const l of lines) {
     const text = normaliseOcrText(l.text);
     if (text === null) {
@@ -147,9 +156,51 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
       alreadyText++;
       continue;
     }
-    words.push({ text, ...placeLine(l, toUser), rgb: l.rgb });
+    kept.push({ l, text });
   }
+
+  // the font of each line, so converted values can be written to look the same
+  opts.onProgress?.(0.98, 'Matching the fonts');
+  const fits = opts.render ? matchFonts(pixels, kept, opts.render) : kept.map(() => null);
+  const styles: TextStyleHint[] = [];
+  kept.forEach(({ l, text }, k) => {
+    const fit = fits[k];
+    const place = fit ? placeFit(fit, toUser) : placeLine(l, toUser);
+    words.push({ text, ...place, rgb: l.rgb });
+    if (fit) styles.push({ text, origin: place.origin, face: fit.face, hscale: fit.hscale, slant: fit.slant });
+  });
   opts.onProgress?.(1, 'Adding the text layer');
   const out = await withTextLayers(bytes, new Map([[pageIndex, words]]));
-  return { bytes: new Uint8Array(out), added: words.length, alreadyText, unsupported };
+  return { bytes: new Uint8Array(out), added: words.length, alreadyText, unsupported, styles };
+}
+
+/** Face fits for OCR lines (null where the letters could not be measured). */
+export function matchFonts(img: RGBA, lines: { l: LineBox; text: string }[], render: RenderText, prefer?: Face['family']): (Fit | null)[] {
+  const measured = lines.map(({ l, text }) => {
+    let best: { text: string; m: Measured; box: LineBox; fits: Fit[] } | null = null;
+    // a box a few degrees off an axis is also tried on the axis; the better one counts
+    for (const box of [l, snappedBox(l)]) {
+      if (!box) continue;
+      const m = measureLine(img, box, text);
+      if (!m) continue;
+      const fits = scoreFaces(m, text, render);
+      const top = Math.max(-1, ...fits.map((f) => f.score));
+      if (!best || top > Math.max(-1, ...best.fits.map((f) => f.score))) best = { text, m, box, fits };
+    }
+    return best;
+  });
+  const ok = measured.filter((x): x is NonNullable<typeof x> => !!x);
+  const chosen = chooseFits(ok, render, prefer).fits;
+  const out: (Fit | null)[] = [];
+  let k = 0;
+  for (const x of measured) out.push(x ? chosen[k++] : null);
+  return out;
+}
+
+/** Text placement of a face fit: baseline start, advance vector and em vector, mapped through `map`. */
+export function placeFit(f: Fit, map: (x: number, y: number) => [number, number]): { origin: [number, number]; across: [number, number]; up: [number, number] } {
+  const o = map(f.origin.x, f.origin.y);
+  const a = map(f.origin.x + f.u.x * f.advancePx, f.origin.y + f.u.y * f.advancePx);
+  const t = map(f.origin.x - f.d.x * f.emPx, f.origin.y - f.d.y * f.emPx);
+  return { origin: o, across: [a[0] - o[0], a[1] - o[1]], up: [t[0] - o[0], t[1] - o[1]] };
 }

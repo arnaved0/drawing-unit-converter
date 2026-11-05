@@ -7,6 +7,7 @@
 import {
   appendBezierCurve,
   closePath,
+  concatTransformationMatrix,
   degrees,
   fill,
   lineTo,
@@ -34,6 +35,89 @@ import type { Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
 import { coverPolygons, layoutText, movedPos, ocrPatch } from '../render/svg';
+import { faceChar, getFace, type FaceId } from '../fonts/faces';
+
+/** Loads a bundled font file (public/fonts) for embedding. */
+export type FontLoader = (id: FaceId) => Promise<Uint8Array>;
+
+/**
+ * The fonts a PDF writes text in: Helvetica, plus the bundled faces that
+ * texts were matched to (when a loader is given).
+ */
+class Fonts {
+  private faces = new Map<FaceId, PDFFont | null>();
+  constructor(
+    private doc: PDFDocument,
+    readonly helvetica: PDFFont,
+    private load?: FontLoader,
+  ) {}
+
+  static async create(doc: PDFDocument, load?: FontLoader): Promise<Fonts> {
+    return new Fonts(doc, await doc.embedFont(StandardFonts.Helvetica), load);
+  }
+
+  /** Embeds the faces of these texts. A face that fails to load falls back to Helvetica. */
+  async prepare(texts: TextEntity[]): Promise<void> {
+    if (!this.load) return;
+    const ids = [...new Set(texts.map((t) => t.face).filter((x): x is FaceId => !!x))].filter((id) => !this.faces.has(id));
+    if (!ids.length) return;
+    const fontkit = (await import('@pdf-lib/fontkit')).default;
+    this.doc.registerFontkit(fontkit);
+    for (const id of ids) {
+      try {
+        this.faces.set(id, await this.doc.embedFont(await this.load(id), { subset: false }));
+      } catch (err) {
+        console.warn(`Font ${id} could not be embedded`, err);
+        this.faces.set(id, null);
+      }
+    }
+  }
+
+  /** The font for a text, and its characters made safe for it ("?" for what it cannot draw). */
+  forText(t: TextEntity, s: string): { font: PDFFont; text: string; lossy: boolean } {
+    const font = t.face ? this.faces.get(t.face) : null;
+    if (!font) return { font: this.helvetica, ...winAnsiSafe(this.helvetica, s) };
+    const face = getFace(t.face);
+    let text = '';
+    let lossy = false;
+    for (const ch of s) {
+      const c = faceChar(face, ch);
+      if (c) text += c;
+      else {
+        text += '?';
+        lossy = true;
+      }
+    }
+    return { font, text, lossy };
+  }
+}
+
+/**
+ * Writes a line of text like text `t`: its font, width factor and lean.
+ * `anchor` and `dir` are in PDF user space; `size` is the em size there.
+ */
+function drawStyled(
+  page: PDFPage,
+  t: TextEntity,
+  f: { font: PDFFont; text: string },
+  anchor: Pt,
+  dir: Pt,
+  size: number,
+  align: TextEntity['align'],
+  color: ReturnType<typeof rgb>,
+): void {
+  const len = Math.hypot(dir.x, dir.y) || 1;
+  const c = dir.x / len;
+  const s = dir.y / len;
+  const hs = t.hscale && t.hscale > 0 ? t.hscale : 1;
+  const k = t.slant ?? 0;
+  const w = f.font.widthOfTextAtSize(f.text, size);
+  const shift = align === 'center' ? -w / 2 : align === 'right' ? -w : 0;
+  // translate, rotate, lean, then the width factor
+  page.pushOperators(pushGraphicsState(), concatTransformationMatrix(c * hs, s * hs, c * k - s, s * k + c, anchor.x, anchor.y));
+  page.drawText(f.text, { x: shift, y: 0, size, font: f.font, color });
+  page.pushOperators(popGraphicsState());
+}
 
 function hexRgb(hex: string) {
   const v = parseInt(hex.replace('#', '').slice(0, 6), 16) || 0;
@@ -80,22 +164,26 @@ function polygon(page: PDFPage, pts: Pt[], color = rgb(1, 1, 1)): void {
 }
 
 /** PDF input: white-out the old text, write the converted text. */
-export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{ bytes: Uint8Array; warnings: string[] }> {
+export async function exportPdfOverlay(d: Drawing, dims: Dimension[], loadFont?: FontLoader): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   if (!d.pdf) throw new Error('No PDF source.');
-  return exportPdfPages(d.pdf.bytes, [{ d, dims }]);
+  return exportPdfPages(d.pdf.bytes, [{ d, dims }], loadFont);
 }
 
 /** PDF input with work on several pages: each page gets its converted values. */
-export async function exportPdfPages(bytes: Uint8Array, pages: { d: Drawing; dims: Dimension[] }[]): Promise<{ bytes: Uint8Array; warnings: string[] }> {
+export async function exportPdfPages(bytes: Uint8Array, pages: { d: Drawing; dims: Dimension[] }[], loadFont?: FontLoader): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   const warnings: string[] = [];
   const doc = await PDFDocument.load(bytes, { updateMetadata: false });
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  for (const { d, dims } of pages) if (d.pdf) overlayPage(doc.getPage(d.pdf.pageIndex), font, d, dims);
+  const fonts = await Fonts.create(doc, loadFont);
+  for (const { d, dims } of pages) {
+    const ids = new Set(dims.filter((x) => x.converted).map((x) => x.textId));
+    await fonts.prepare(d.entities.filter((e): e is TextEntity => e.kind === 'text' && ids.has(e.id)));
+  }
+  for (const { d, dims } of pages) if (d.pdf) overlayPage(doc.getPage(d.pdf.pageIndex), fonts, d, dims);
   const out = await doc.save({ useObjectStreams: false });
   return { bytes: out, warnings };
 }
 
-function overlayPage(page: PDFPage, font: PDFFont, d: Drawing, dims: Dimension[]): void {
+function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[]): void {
   if (!d.pdf) return;
   const toUser = invert(d.pdf.userToDrawing);
   const scale = matScale(d.pdf.userToDrawing); // mm per PDF unit
@@ -110,26 +198,19 @@ function overlayPage(page: PDFPage, font: PDFFont, d: Drawing, dims: Dimension[]
     const angle = (Math.atan2(dirU.y, dirU.x) * 180) / Math.PI;
     const color = hexRgb(displayColor(t.style.color));
     const patch = t.ocr ? ocrPatch(t, list) : null;
-    const safe = winAnsiSafe(font, patch ? patch.text : lay.text);
+    const safe = fonts.forText(t, patch ? patch.text : lay.text);
 
     if (patch && !safe.lossy) {
       // OCR / boxed text: cover the old value (and the whole drawn box) and write the new part
       for (const mask of coverPolygons(t, patch)) polygon(page, mask.map((p) => apply(toUser, p)));
-      const w = font.widthOfTextAtSize(safe.text, size);
-      const anchor = apply(toUser, movedPos(t, patch.pos));
-      const len = Math.hypot(dirU.x, dirU.y) || 1;
-      const shift = patch.align === 'center' ? -w / 2 : patch.align === 'right' ? -w : 0;
-      page.drawText(safe.text, { x: anchor.x + (dirU.x / len) * shift, y: anchor.y + (dirU.y / len) * shift, size, font, color, rotate: degrees(angle) });
+      drawStyled(page, t, safe, apply(toUser, movedPos(t, patch.pos)), dirU, size, patch.align, color);
     } else if (!safe.lossy) {
       // cover the whole original text and write the new line
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
       polygon(page, textCorners(t, -pad, 1 + pad).map((p) => apply(toUser, p)));
-      const w = font.widthOfTextAtSize(safe.text, size);
-      const anchor = apply(toUser, movedPos(t, lay.pos));
-      const dirN = { x: dirU.x / Math.hypot(dirU.x, dirU.y), y: dirU.y / Math.hypot(dirU.x, dirU.y) };
-      const shift = lay.align === 'center' ? -w / 2 : lay.align === 'right' ? -w : 0;
-      page.drawText(safe.text, { x: anchor.x + dirN.x * shift, y: anchor.y + dirN.y * shift, size, font, color, rotate: degrees(angle) });
+      drawStyled(page, t, safe, apply(toUser, movedPos(t, lay.pos)), dirU, size, lay.align, color);
     } else {
+      const font = fonts.helvetica;
       // The line holds characters Helvetica lacks (CJK ...): replace only the values.
       const n = Math.max(1, t.text.length);
       for (const dim of list.filter((x) => x.converted)) {
@@ -192,7 +273,7 @@ function segOps(start: Pt, segs: PathSeg[], m: Mat): Op[] {
 
 interface PlotCtx {
   page: PDFPage;
-  font: PDFFont;
+  fonts: Fonts;
   ptPerUnit: number;
   lossyText: boolean;
   byText: Map<string, Dimension[]>;
@@ -266,23 +347,13 @@ function plotEntity(ctx: PlotCtx, e: Entity, m: Mat, depth: number): void {
       if (e.ocr) break; // only PDFs have OCR text, and they are exported by exportPdfOverlay
       const dims = ctx.byText.get(e.id);
       const lay = dims ? layoutText(e, dims) : { text: e.text, pos: e.pos, align: e.align };
-      const safe = winAnsiSafe(ctx.font, lay.text);
+      const safe = ctx.fonts.forText(e, lay.text);
       if (safe.lossy) ctx.lossyText = true;
       const dir = applyVec(m, { x: Math.cos(e.rotation), y: Math.sin(e.rotation) });
-      const dl = Math.hypot(dir.x, dir.y) || 1;
       const size = e.fontSize * matScale(m);
       if (size < 0.5) break;
-      const w = ctx.font.widthOfTextAtSize(safe.text, size);
       const p = apply(m, dims ? movedPos(e, lay.pos) : lay.pos); // moved converted text
-      const shift = lay.align === 'center' ? -w / 2 : lay.align === 'right' ? -w : 0;
-      ctx.page.drawText(safe.text, {
-        x: p.x + (dir.x / dl) * shift,
-        y: p.y + (dir.y / dl) * shift,
-        size,
-        font: ctx.font,
-        color: hexRgb(displayColor(e.style.color)),
-        rotate: degrees((Math.atan2(dir.y, dir.x) * 180) / Math.PI),
-      });
+      drawStyled(ctx.page, e, safe, p, dir, size, lay.align, hexRgb(displayColor(e.style.color)));
       break;
     }
     case 'image':
@@ -300,7 +371,7 @@ function plotEntity(ctx: PlotCtx, e: Entity, m: Mat, depth: number): void {
 const MM = 72 / 25.4;
 
 /** DXF/DWG input: plot the drawing to an A3 sheet (or larger if needed). */
-export async function exportPdfPlot(d: Drawing, dims: Dimension[]): Promise<{ bytes: Uint8Array; warnings: string[] }> {
+export async function exportPdfPlot(d: Drawing, dims: Dimension[], loadFont?: FontLoader): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   const doc = await PDFDocument.create();
   const b = d.bounds;
   const bw = Math.max(b.maxX - b.minX, 1e-6);
@@ -312,8 +383,10 @@ export async function exportPdfPlot(d: Drawing, dims: Dimension[]): Promise<{ by
   const ox = (W - bw * s) / 2 - b.minX * s;
   const oy = (H - bh * s) / 2 - b.minY * s;
   const page = doc.addPage([W, H]);
-  const font = await doc.embedFont(StandardFonts.Helvetica);
-  const ctx: PlotCtx = { page, font, ptPerUnit: s, lossyText: false, byText: groupDims(dims), d };
+  const fonts = await Fonts.create(doc, loadFont);
+  const allTexts = (es: Entity[]): TextEntity[] => es.flatMap((e) => (e.kind === 'text' ? [e] : []));
+  await fonts.prepare([...allTexts(d.entities), ...Object.values(d.blocks).flatMap((b) => allTexts(b.entities))]);
+  const ctx: PlotCtx = { page, fonts, ptPerUnit: s, lossyText: false, byText: groupDims(dims), d };
   const m: Mat = [s, 0, 0, s, ox, oy];
   for (const e of d.entities) plotEntity(ctx, e, m, 0);
   doc.setTitle(d.name);

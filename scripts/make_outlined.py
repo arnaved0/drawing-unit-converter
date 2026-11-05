@@ -49,11 +49,18 @@ class ShapePen(BasePen):
         pass
 
 
-def outline(name: str) -> None:
-    font = TTFont(FONT)
+def outline(name: str, font_path: str = FONT, out_name: str = "", own_spacing: bool = False, width_factor: float = 1.0) -> None:
+    """Outline the text of a sample.
+
+    By default each letter goes where the original (Helvetica) letter was.
+    With own_spacing, each span is laid out with the font's own advance widths
+    (times width_factor), the way a CAD program exports text in that font.
+    """
+    font = TTFont(font_path)
     cmap = font.getBestCmap()
     gs = font.getGlyphSet()
     upem = font["head"].unitsPerEm
+    hmtx = font["hmtx"].metrics
     doc = pymupdf.open(os.path.join(SAMPLES, name + ".pdf"))
     for page in doc:
         chars = []
@@ -63,9 +70,16 @@ def outline(name: str) -> None:
                 for span in line["spans"]:
                     color = span["color"]
                     rgb = ((color >> 16) & 255) / 255, ((color >> 8) & 255) / 255, (color & 255) / 255
+                    pen = None
                     for ch in span["chars"]:
+                        if pen is None:
+                            pen = ch["origin"]
+                        origin = pen if own_spacing else ch["origin"]
                         if ord(ch["c"]) in cmap and ch["c"].strip():
-                            chars.append((ch["c"], ch["origin"], span["size"], (dx, dy), rgb, ch["bbox"]))
+                            chars.append((ch["c"], origin, span["size"], (dx, dy), rgb, ch["bbox"]))
+                        if ord(ch["c"]) in cmap:
+                            a = hmtx[cmap[ord(ch["c"])]][0] * span["size"] / upem * width_factor
+                            pen = (pen[0] + a * dx, pen[1] + a * dy)
         # remove the text that gets outlined; keep drawings and images
         for c in chars:
             page.add_redact_annot(pymupdf.Rect(c[5]), fill=False)
@@ -75,18 +89,33 @@ def outline(name: str) -> None:
             k = size / upem
             # PyMuPDF page coordinates are y-down; dir is the baseline direction in them
             def xf(pt, ox=ox, oy=oy, k=k, dx=dx, dy=dy):
-                u, v = pt[0] * k, pt[1] * k
+                u, v = pt[0] * k * width_factor, pt[1] * k
                 return ox + u * dx + v * dy, oy + u * dy - v * dx
             shape = page.new_shape()
             gs[glyph].draw(ShapePen(gs, shape, xf))
             shape.finish(color=None, fill=rgb, closePath=True, even_odd=False)
             shape.commit()
-    os.makedirs(OUT, exist_ok=True)
-    doc.save(os.path.join(OUT, name + "-outlined.pdf"), garbage=3, deflate=True)
-    print(name, "outlined")
+    out = os.path.join(OUT, out_name or name + "-outlined.pdf")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    doc.save(out, garbage=3, deflate=True)
+    print(os.path.relpath(out, SAMPLES), "outlined")
+
+
+# Test drawings with a known font: text laid out in that font, as a CAD export would.
+# Sources are the downloads of scripts/make_fonts.py (scratch/font-sources).
+FONT_SOURCES = os.path.join(HERE, "..", "scratch", "font-sources")
+FONT_SAMPLES = [
+    ("vera", FONT, 1.0),
+    ("tinos", os.path.join(FONT_SOURCES, "Tinos-Regular.ttf"), 1.0),
+    ("osifont", os.path.join(FONT_SOURCES, "osifont-lgpl3fe.ttf"), 1.0),
+    ("osifont-narrow", os.path.join(FONT_SOURCES, "osifont-lgpl3fe.ttf"), 0.8),
+    ("tinos-bold", os.path.join(FONT_SOURCES, "Tinos-Bold.ttf"), 1.0),
+]
 
 
 if __name__ == "__main__":
     for n in ("defrost-heater", "flange-heater", "arc-element"):
         outline(n)
+    for tag, path, wf in FONT_SAMPLES:
+        outline("defrost-heater", path, os.path.join("fonts", f"defrost-{tag}.pdf"), own_spacing=True, width_factor=wf)
     _ = math

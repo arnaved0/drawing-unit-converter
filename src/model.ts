@@ -2,6 +2,8 @@
 // polylines with bulges, text, block inserts) so that every input format maps
 // onto it and every output format can be written from it.
 
+import type { FaceId } from './fonts/faces';
+
 export interface Pt {
   x: number;
   y: number;
@@ -111,6 +113,16 @@ export interface TextEntity extends Base {
   widthExact: boolean;
   align: 'left' | 'center' | 'right';
   fontFamily?: string;
+  /**
+   * The bundled font that looks like this text (src/fonts/faces.ts): from the
+   * font name for real text, matched to the letter shapes for OCR text.
+   * Converted values are written in it.
+   */
+  face?: FaceId;
+  /** Width factor against the face's own widths (1 when missing). */
+  hscale?: number;
+  /** Lean of sloped lettering: tan of the angle, positive leans right. */
+  slant?: number;
   /** Text belongs to a real dimension object (DXF/DWG DIMENSION). */
   isDimension?: boolean;
   /** Dimension type when isDimension: angular dimensions are never converted. */

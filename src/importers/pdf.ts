@@ -8,6 +8,7 @@ import { compoundFill, subpathToEntity, type RawSeg, type RawSubpath } from '../
 import { guessDimensionUnit } from '../dimensions';
 import { apply, applyVec, drawingBounds, entityBox, IDENTITY, matScale, mul, pointInPoly, textCorners, type Mat } from '../geom';
 import { countEntities, emptyStats, newId, TEXT_OUTLINES, type Drawing, type Entity, type Pt, type Style, type TextEntity } from '../model';
+import { advance, faceForFontName, getFace, type FaceId } from '../fonts/faces';
 
 /** The subset of the pdf.js API used here (works with the browser and the Node "legacy" build). */
 export interface PdfJs {
@@ -27,6 +28,18 @@ export interface PdfImportOptions {
   detectBlocks?: boolean;
   /** Extra pdf.js getDocument parameters (cMapUrl, standardFontDataUrl ...). */
   docParams?: Record<string, unknown>;
+  /** Fonts found by the Scan & OCR pass for its text layer (PDF user space). */
+  textStyles?: TextStyleHint[];
+}
+
+/** The look of an OCR line: which face, width factor and slant it was matched to. */
+export interface TextStyleHint {
+  text: string;
+  /** Baseline start in PDF user space. */
+  origin: [number, number];
+  face: FaceId;
+  hscale: number;
+  slant: number;
 }
 
 interface GState {
@@ -102,6 +115,36 @@ interface RawText {
   font: string;
   /** Text rendering mode 3: an OCR text layer. */
   invisible: boolean;
+  face?: FaceId;
+  hscale?: number;
+  slant?: number;
+}
+
+/** Name and style flags of a pdf.js font, when it has been loaded. */
+function fontInfo(page: any, id: string | undefined): { name?: string; bold?: boolean; black?: boolean; italic?: boolean } | null {
+  if (!id) return null;
+  try {
+    const store = id.startsWith('g_') ? page.commonObjs : page.objs;
+    if (!store.has(id)) return null;
+    const f = store.get(id);
+    return { name: f?.name ?? f?.fallbackName, bold: !!f?.bold, black: !!f?.black, italic: !!f?.italic };
+  } catch {
+    return null;
+  }
+}
+
+/** The OCR style hint written for a text-layer run: same start (within a tenth of its size) and text. */
+function nearestHint(hints: TextStyleHint[], x: number, y: number, str: string, size: number): TextStyleHint | null {
+  let best: TextStyleHint | null = null;
+  let bestD = Math.max(0.5, 0.25 * size);
+  for (const h of hints) {
+    const d = Math.hypot(h.origin[0] - x, h.origin[1] - y);
+    if (d < bestD && (h.text.startsWith(str.trim().slice(0, 3)) || str.trim().startsWith(h.text.slice(0, 3)))) {
+      best = h;
+      bestD = d;
+    }
+  }
+  return best;
 }
 
 /** Merges runs that continue each other on the same baseline (per-character PDF output). */
@@ -354,16 +397,23 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
       const dl = Math.hypot(dv.x, dv.y) || 1;
       const size = Math.hypot(up.x, up.y) || (item.height ?? 10) * PT_TO_MM;
       const widthScale = matScale(userToDrawing);
-      raw.push({
-        str: item.str,
-        origin,
-        dir: { x: dv.x / dl, y: dv.y / dl },
-        size,
-        width: (item.width ?? 0) * widthScale,
-        color,
-        font: tc.styles?.[item.fontName]?.fontFamily ?? 'sans-serif',
-        invisible,
-      });
+      const width = (item.width ?? 0) * widthScale;
+      const generic = tc.styles?.[item.fontName]?.fontFamily ?? 'sans-serif';
+      const run: RawText = { str: item.str, origin, dir: { x: dv.x / dl, y: dv.y / dl }, size, width, color, font: generic, invisible };
+      if (invisible) {
+        // OCR text layer: the Scan & OCR pass matched the letters it covers to a face
+        const hint = opts.textStyles?.length ? nearestHint(opts.textStyles, t[4], t[5], item.str, Math.hypot(t[2], t[3])) : null;
+        if (hint) Object.assign(run, { face: hint.face, hscale: hint.hscale, slant: hint.slant });
+      } else {
+        // real text: a lookalike of the font it names, as wide as the original
+        const info = fontInfo(page, item.fontName);
+        const face = getFace(faceForFontName(info?.name, { bold: info?.bold || info?.black, serif: generic === 'serif', mono: generic === 'monospace' }));
+        const own = advance(face, item.str) * size;
+        let hscale = width > 0 && own > 0 && item.str.trim().length >= 2 ? width / own : 1;
+        if (!(hscale > 0.5 && hscale < 2) || Math.abs(hscale - 1) < 0.03) hscale = 1;
+        Object.assign(run, { face: face.id, hscale, slant: info?.italic ? 0.2 : 0 });
+      }
+      raw.push(run);
     }
     for (const r of mergeRuns(raw)) {
       const text = r.str.replace(/\s+$/, '').replace(/^\s+/, '');
@@ -381,6 +431,9 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
         align: 'left',
         fontFamily: r.font,
       };
+      if (r.face) te.face = r.face;
+      if (r.hscale && r.hscale !== 1) te.hscale = r.hscale;
+      if (r.slant) te.slant = r.slant;
       if (r.invisible) te.ocr = true;
       entities.push(te);
     }

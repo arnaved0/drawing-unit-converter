@@ -7,6 +7,7 @@ import { bulgeArc, insertMatrix, textCorners, type Mat } from '../geom';
 import type { Dimension, DisplayText } from '../dimensions';
 import { displayText, isStandaloneDimension } from '../dimensions';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity, Vertex } from '../model';
+import { advance, getFace } from '../fonts/faces';
 
 const f = (v: number) => (Math.abs(v) < 1e-9 ? '0' : +v.toFixed(4) + '');
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -58,11 +59,28 @@ function segsD(start: Pt, segs: PathSeg[], closed: boolean): string {
 
 const matAttr = (m: Mat) => `matrix(${m.map(f).join(' ')})`;
 
+/** CSS font-family of a text: its matched face, else a generic family like the original. */
+function cssFamily(t: TextEntity): string {
+  if (t.face) {
+    const face = getFace(t.face);
+    return `'${face.css}', ${face.generic}`;
+  }
+  return /serif|mono/i.test(t.fontFamily ?? '') && !/sans/i.test(t.fontFamily ?? '') ? t.fontFamily! : 'Arial, Helvetica, sans-serif';
+}
+
+/** Advance width of `s` written like text `t` (its face, size and width factor), in drawing units. */
+export function textAdvance(t: TextEntity, s: string): number {
+  if (t.face) return advance(getFace(t.face), s) * t.fontSize * (t.hscale ?? 1);
+  return (t.width / Math.max(1, [...t.text].length)) * [...s].length;
+}
+
 export function textSvg(t: TextEntity, text = t.text, pos = t.pos, align = t.align, extraClass = ''): string {
   const deg = (t.rotation * 180) / Math.PI;
   const anchor = align === 'center' ? 'middle' : align === 'right' ? 'end' : 'start';
-  const family = /serif|mono/i.test(t.fontFamily ?? '') && !/sans/i.test(t.fontFamily ?? '') ? t.fontFamily : 'Arial, Helvetica, sans-serif';
-  return `<text class="t ${extraClass}" transform="translate(${f(pos.x)} ${f(pos.y)}) rotate(${f(deg)}) scale(1 -1)" font-size="${f(t.fontSize)}" text-anchor="${anchor}" font-family="${esc(family!)}" fill="${displayColor(t.style.color)}" xml:space="preserve">${esc(text)}</text>`;
+  // width factor and lean, so the text has the original's proportions
+  const skew = t.slant ? ` skewX(${f((Math.atan(t.slant) * 180) / Math.PI)})` : '';
+  const hs = t.hscale && t.hscale !== 1 ? t.hscale : 1;
+  return `<text class="t ${extraClass}" transform="translate(${f(pos.x)} ${f(pos.y)}) rotate(${f(deg)})${skew} scale(${f(hs)} -1)" font-size="${f(t.fontSize)}" text-anchor="${anchor}" font-family="${esc(cssFamily(t))}" fill="${displayColor(t.style.color)}" xml:space="preserve">${esc(text)}</text>`;
 }
 
 export function entitySvg(e: Entity): string {
@@ -140,8 +158,7 @@ export interface TextLayout {
  */
 export function layoutText(t: TextEntity, dims: Dimension[]): TextLayout {
   const display = displayText(t.text, dims);
-  const perChar = t.width / Math.max(1, [...t.text].length);
-  const width = display.changed ? perChar * [...display.text].length : t.width;
+  const width = display.changed ? textAdvance(t, display.text) : t.width;
   if (!display.changed || t.align === 'center' || !isStandaloneDimension(t.text, dims)) {
     return { text: display.text, pos: t.pos, align: t.align, width, display };
   }
@@ -170,8 +187,9 @@ export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
   const cut = Math.min(...conv.map((d) => d.start));
   const lay = layoutText(t, dims);
   if (cut === 0 || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
-  const from = cut / Math.max(1, t.text.length);
-  const shift = t.width * from;
+  // where the value starts: the width of the text before it, in the text's own font
+  const shift = Math.min(t.width, t.face ? textAdvance(t, t.text.slice(0, cut)) : (t.width * cut) / Math.max(1, t.text.length));
+  const from = shift / Math.max(t.width, 1e-9);
   return {
     from,
     text: lay.text.slice(cut),
@@ -219,8 +237,7 @@ export function movedPos(t: TextEntity, p: Pt): Pt {
 
 /** Where the move handle of a converted text sits: just before the start of the new text. */
 export function handlePoint(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): Pt {
-  const perChar = t.width / Math.max(1, [...t.text].length);
-  const w = perChar * [...drawn.text].length;
+  const w = textAdvance(t, drawn.text);
   const back = drawn.align === 'center' ? w / 2 : drawn.align === 'right' ? w : 0;
   const dx = Math.cos(t.rotation);
   const dy = Math.sin(t.rotation);
@@ -229,11 +246,30 @@ export function handlePoint(t: TextEntity, drawn: { text: string; pos: Pt; align
   return { x: drawn.pos.x + dx * u - dy * v, y: drawn.pos.y + dy * u + dx * v };
 }
 
-function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): string {
+/** Corners of a line of text written like `t` at `pos`. */
+function drawnCorners(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): Pt[] {
+  const w = textAdvance(t, drawn.text);
+  const u0 = drawn.align === 'center' ? -w / 2 : drawn.align === 'right' ? -w : 0;
+  const dx = Math.cos(t.rotation);
+  const dy = Math.sin(t.rotation);
+  const at = (u: number, v: number): Pt => ({ x: drawn.pos.x + dx * u - dy * v, y: drawn.pos.y + dy * u + dx * v });
+  return [at(u0, -0.25 * t.fontSize), at(u0 + w, -0.25 * t.fontSize), at(u0 + w, t.fontSize), at(u0, t.fontSize)];
+}
+
+/**
+ * The move handle of a converted text. `near` is the area it belongs to (the
+ * original's box and the new text, drawing coordinates): it is only shown
+ * while the pointer is on or near that area.
+ */
+function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }, area: Pt[]): string {
   const p = handlePoint(t, drawn);
+  const pts = [...area, ...drawnCorners(t, drawn), p];
+  const xs = pts.map((q) => q.x);
+  const ys = pts.map((q) => q.y);
+  const near = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map(f).join(' ');
   // drawn in screen pixels (scaled by --hairn) so it stays the same size at any zoom
   return (
-    `<g class="handle" data-handle="${t.id}" transform="translate(${f(p.x)} ${f(p.y)})"><g class="handle-in">` +
+    `<g class="handle" data-handle="${t.id}" data-near="${near}" transform="translate(${f(p.x)} ${f(p.y)})"><g class="handle-in">` +
     `<circle r="8"/><path d="M0 -5.5V5.5M-5.5 0H5.5M0 -5.5l-2 2M0 -5.5l2 2M0 5.5l-2-2M0 5.5l2-2M-5.5 0l2-2M-5.5 0l2 2M5.5 0l-2-2M5.5 0l-2 2"/>` +
     `<title>Drag to move the converted text</title></g></g>`
   );
@@ -256,11 +292,15 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
     if (!list) continue;
     const layout = layoutText(e, list);
     let drawn: { text: string; pos: Pt; align: TextEntity['align'] } | null = null;
+    const area: Pt[] = [];
     if (e.ocr) {
       const patch = ocrPatch(e, list);
       if (patch) {
         // the white-out stays over the original; only the new text moves
-        for (const mask of coverPolygons(e, patch)) texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
+        for (const mask of coverPolygons(e, patch)) {
+          area.push(...mask);
+          texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
+        }
         drawn = { text: patch.text, pos: movedPos(e, patch.pos), align: patch.align };
         texts.push(textSvg(e, drawn.text, drawn.pos, drawn.align, 'converted'));
       }
@@ -268,13 +308,14 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
       drawn = { text: layout.text, pos: movedPos(e, layout.pos), align: layout.align };
       texts.push(textSvg(e, drawn.text, drawn.pos, drawn.align, 'converted'));
     } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, ''));
-    if (drawn) handles.push(handleSvg(e, drawn));
     for (const dim of list) {
       // a box the user drew stays the box they drew
       const poly = e.cover && list.length === 1 ? e.cover : dimPolygon(e, layout, dim.id);
+      area.push(...poly);
       const cls = `dim${dim.converted ? ' converted' : ''}${showHighlights ? '' : ' quiet'}`;
       overlays.push(`<polygon class="${cls}" data-dim="${dim.id}" points="${poly.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"><title>${esc(dim.original)}${dim.converted ? ' → ' + esc(dim.converted.text) : ''}</title></polygon>`);
     }
+    if (drawn) handles.push(handleSvg(e, drawn, area));
   }
   // handles on top, so they can be grabbed where they overlap a box
   return { texts: texts.join(''), overlays: overlays.join('') + handles.join('') };
