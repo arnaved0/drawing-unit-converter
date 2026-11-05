@@ -222,6 +222,8 @@ export function cleanOcrText(s: string): string {
   t = t.replace(/(?<=\d)\.\s+(?=\d)/g, '. ');
   // "86:0°", "10:9mm": a colon inside a number is a misread decimal point
   t = t.replace(/(?<=\d)[:;](?=\d+\s?(?:°|mm|cm|in\b|"))/g, '.');
+  // a small degree sign is often read as "*" or "º": "112*" -> "112°"
+  t = t.replace(/(?<=\d)\s?[*\u00ba\u02da](?=$|[\s,;)\]])/g, '\u00b0');
   // the diameter sign has several look-alikes (the model has no Ø of its own)
   t = t.replace(/[Φφ⌀∅]/g, '\u00d8').replace(/ø(?=\s?\d)/g, '\u00d8');
   return t;
