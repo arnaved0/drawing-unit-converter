@@ -12,10 +12,10 @@ import { fitFace, measureLine, snappedBox, type Fit, type LineBox, type Measured
 const DIA = '\u00d8';
 
 /** A number that can be a length: alone, or followed by a unit, a tolerance class, a count or punctuation. */
-const LENGTH_AFTER = /^(?:\d+(?:\.\s?\d+)?|\.\d+)(?=$|\s|mm\b|cm\b|m\b|in\b|"|\u2033|[)\],;xX\u00d7]|[A-HJ-NP-Za-hj-np-z]{1,2}\d{1,2}\b|$)/;
+const LENGTH_AFTER = /^(?:\d+(?:\.\s?\d+)?|\.\d+)(?=$|\s|mm\b|cm\b|m\b|in\b|"|\u2033|\/\d|-\d+\/\d|[)\],;xX\u00d7]|[A-HJ-NP-Za-hj-np-z]{1,2}\d{1,2}\b|$)/;
 
-/** Start of a word: what may come before a Ø ("2X Ø12", "(Ø8)", "Bore Ø22"). */
-const WORD_START = /(^|[\s(\[=:<>~])$/;
+/** Start of a word: what may come before a Ø ("2X Ø12", "(Ø8)", "Bore Ø22", "2XØ12"). */
+const WORD_START = /(^|[\s(\[=:<>~]|\d[xX])$/;
 
 interface Edit {
   text: string;

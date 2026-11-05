@@ -28,6 +28,8 @@ export interface LengthToken {
   noLabel?: boolean;
   /** Written with a decimal comma ("1504,68"): the converted value keeps it. */
   comma?: boolean;
+  /** Written as feet and inches ("5'-3 1/2\""): value is in inches. */
+  compound?: boolean;
   /** The custom unit's suffix written after the value ("12 u"); unit is then null. */
   suffix?: string;
 }
@@ -69,7 +71,9 @@ export function replaceStart(d: Dimension, text: string): number {
   return diameterSignBefore(text, d.start)?.start ?? d.start;
 }
 
-const UNIT_RE = /^(\s?)(mm|cm|m|inches|inch|in\.?|"|\u201d|\u2033|ft\.?|feet|'|\u2019|\u2032)(?![a-z])/;
+// A unit word is not followed by a letter, except "x" and a number (6inx45°,
+// 10mmx20mm). A unit sign may be ("3/8\"THRU": OCR often drops that space).
+const UNIT_RE = /^(\s?)((?:mm|cm|m|inches|inch|in\.?|ft\.?|feet)(?![a-wyz]|x(?!\s?\d))|"|\u201d|\u2033|'|\u2019|\u2032)/;
 const UNIT_OF: Record<string, LengthUnit> = {
   mm: 'mm', cm: 'cm', m: 'm', in: 'in', 'in.': 'in', inch: 'in', inches: 'in', '"': 'in', '\u201d': 'in', '\u2033': 'in',
   ft: 'ft', 'ft.': 'ft', feet: 'ft', "'": 'ft', '\u2019': 'ft', '\u2032': 'ft',
@@ -103,15 +107,104 @@ export function knownUnit(suffix: string): LengthUnit | null {
 
 const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// ---------------------------------------------------------------- fractions and feet-inches
+
+/** Fraction characters: ½ ⅓ ⅔ ¼ ¾ ⅕ ⅖ ⅗ ⅘ ⅙ ⅚ ⅛ ⅜ ⅝ ⅞. */
+const VULGAR: Record<string, number> = {
+  '\u00bd': 1 / 2, '\u2153': 1 / 3, '\u2154': 2 / 3, '\u00bc': 1 / 4, '\u00be': 3 / 4, '\u2155': 1 / 5, '\u2156': 2 / 5, '\u2157': 3 / 5,
+  '\u2158': 4 / 5, '\u2159': 1 / 6, '\u215a': 5 / 6, '\u215b': 1 / 8, '\u215c': 3 / 8, '\u215d': 5 / 8, '\u215e': 7 / 8,
+};
+const VUL = `[${Object.keys(VULGAR).join('')}]`;
+/** "/" and the fraction and division slashes that fonts and OCR produce. */
+const SL = '[/\\u2044\\u2215]';
+const FRAC = `(?:\\d+${SL}\\d+|${VUL})`;
+/** A number of inches: "3 3/8", "3-3/8", "3⅜", "3/8", "3.375". */
+const INCH_VAL = `(?:\\d+(?:\\s+|-|(?=${VUL}))${FRAC}|${FRAC}|\\d+(?:\\.\\d+)?)`;
+const NOT_WORD = '(?![A-WYZa-wyz]|[xX](?!\\s?\\d))';
+const INCH_U = `\\s?(?:"|\u201d|\u2033|''|(?:in\\.?|inch(?:es)?)${NOT_WORD})`;
+const FT_U = `\\s?(?:'|\u2019|\u2032|ft\\.?|feet|foot)${NOT_WORD}`;
+/** Feet and inches ("5'-3 1/2\"", "5' 6\"", "5 ft 6 in"), fractional inches ("3 3/8\""), or a bare fraction ("3 3/8"). */
+const IMPERIAL_RE = new RegExp(
+  `(\\d+(?:\\.\\d+)?)(${FT_U})\\s?(?:-\\s?)?(${INCH_VAL})(${INCH_U})` + // 1-4: feet-inches
+    `|((?:\\d+(?:\\s+|-|(?=${VUL})))?${FRAC})(${INCH_U})?`, // 5-6: a fraction, in inches or bare
+  'giu',
+);
+
+/** "3/8" -> 0.375, "⅜" -> 0.375; an OCR-merged "33/8" (no space) -> 3.375. */
+function fractionValue(f: string): number {
+  if (VULGAR[f] !== undefined) return VULGAR[f];
+  const [ns, ds] = f.split(/[/\u2044\u2215]/);
+  const den = Number(ds);
+  // drawings do not write improper fractions: "33/8" is 3 3/8, "115/16" is 1 15/16
+  if (ns.length >= 2 && Number(ns) >= den && (den & (den - 1)) === 0) {
+    for (let k = ns.length - 1; k >= 1; k--) {
+      const num = Number(ns.slice(ns.length - k));
+      if (num > 0 && num < den && num % 2 === 1) return Number(ns.slice(0, ns.length - k)) + num / den;
+    }
+  }
+  return Number(ns) / den;
+}
+
+/** "3 3/8" -> 3.375, "3-3/8", "3⅜", "3/8", "3.375". */
+export function inchValue(s: string): number {
+  const t = s.trim();
+  const m = new RegExp(`^(\\d+)(?:\\s+|-|(?=${VUL}))(${FRAC})$`, 'u').exec(t);
+  if (m) return Number(m[1]) + fractionValue(m[2]);
+  if (new RegExp(`^${FRAC}$`, 'u').test(t)) return fractionValue(t);
+  return parseFloat(t);
+}
+
+/** A thread or pipe size follows: 3/4"NPT, 5/8"-18UNF, 1/4-20 UNC. */
+const isThread = (rest: string) => PIPE_THREAD_RE.test(rest) || /^\s?-\s?\d+\s?-?\s?(?:UNC|UNF|UNEF|UNS|UN|NC|NF)\b/i.test(rest);
+
+/** Values written as fractions or feet and inches: the ordinary scan cannot read them. */
+function imperialTokens(text: string): Candidate[] {
+  const out: Candidate[] = [];
+  IMPERIAL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = IMPERIAL_RE.exec(text))) {
+    const s = m.index;
+    const e = s + m[0].length;
+    const prev = text[s - 1] ?? '';
+    const rest = text.slice(e);
+    // part of a longer number, a size code (#10-24) or a date (1/2/2024)
+    if (/[\d.#/\u2044]/.test(prev) || /^[/\u2044]\d/.test(rest)) continue;
+    const before = text.slice(0, s);
+    if (/[A-Za-z]$/.test(before) && !/(?:^|[^A-Za-z])(?:S?R|dia)$/i.test(before)) continue;
+    if (m[1] !== undefined) {
+      // feet and inches: one length, in inches
+      if (isThread(rest)) continue;
+      const value = Number(m[1]) * 12 + inchValue(m[3]);
+      if (!(value > 0)) continue;
+      out.push({ start: s, end: e, value, unit: 'in', spaced: false, kind: kindFromPrefix(before), hasUnit: true, compound: true });
+    } else {
+      const value = inchValue(m[5]);
+      if (!(value > 0) || !Number.isFinite(value)) continue;
+      if (m[6] !== undefined) {
+        if (isThread(rest)) continue; // 3/4"NPT, 5/8"-18UNF
+        out.push({ start: s, end: e, value, unit: 'in', spaced: /^\s/.test(m[6]), kind: kindFromPrefix(before), hasUnit: true });
+      } else {
+        // a bare fraction: a length only in a text that is just a dimension (like bare numbers)
+        if (/^[A-Za-z%\u00b0]/.test(rest) || /^\s?-\s?\d/.test(rest) || DEGREE_RE.test(rest) || isThread(rest)) continue; // 3/4NPT, 1/4-20, 1/2°
+        out.push({ start: s, end: e, value, unit: null, spaced: false, kind: kindFromPrefix(before), hasUnit: false });
+      }
+    }
+  }
+  return out;
+}
+
 function scan(text: string, customSuffix?: string): Candidate[] {
   // a suffix of the user's own counts as a unit ("12 u", "3pt")
   const own = customSuffix?.trim() && !knownUnit(customSuffix) ? new RegExp(`^(\\s?)(${escRe(customSuffix.trim())})(?![A-Za-z])`, 'i') : null;
-  const out: Candidate[] = [];
+  const out: Candidate[] = imperialTokens(text);
+  const taken = out.map((c) => [c.start, c.end]);
   const re = /\d+(?:\.\s?\d+)?|\.\d+/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     const s = m.index;
     const e = s + m[0].length;
+    // already read as part of a fraction or a feet-inch value
+    if (taken.some(([a, b]) => s >= a && s < b)) continue;
     const prev = text[s - 1] ?? '';
     const prev2 = text[s - 2] ?? '';
     const before = text.slice(0, s);
@@ -158,6 +251,7 @@ function scan(text: string, customSuffix?: string): Candidate[] {
     if (!Number.isFinite(value) || value === 0) continue;
     out.push({ start: s, end, value, unit, spaced, kind: kindFromPrefix(before), hasUnit: unit !== null || !!suffix, ...(suffix ? { suffix } : {}) });
   }
+  out.sort((a, b) => a.start - b.start);
   // "100x50mm": the first value of a size takes the unit of the second.
   for (let i = out.length - 2; i >= 0; i--) {
     const a = out[i];
@@ -256,7 +350,8 @@ export function replacementText(d: Dimension, fullText: string, s: ConversionSet
     const sep = f.symbol ? '' : d.unit || d.suffix ? (d.spaced ? ' ' : '') : ' ';
     out += sep + f.label;
   }
-  if (/^[A-Za-z]/.test(fullText.slice(d.end))) out += ' '; // "8mmDia" -> "0.31 in Dia"
+  // "8mmDia" -> "0.31 in Dia", but "6\"x45°" stays "152.4mmx45°"
+  if (/^[A-Za-z]/.test(fullText.slice(d.end)) && !/^[xX]\s?\d/.test(fullText.slice(d.end))) out += ' ';
   return out;
 }
 

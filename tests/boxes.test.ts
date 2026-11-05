@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { addBoxedText, boxPoly, dimensionCentre, textFromBox, textFromPlacement } from '../src/boxes';
+import { addBoxedText, boxPoly, dimensionCentre, outlineFrame, polyArea, textFromBox, textFromPlacement } from '../src/boxes';
+import { pointInPoly } from '../src/geom';
 import { convertDimension, detectDimensions } from '../src/dimensions';
 import { writeDxfR12 } from '../src/export/dxfR12';
 import { readRegion } from '../src/ocr/engine';
@@ -136,3 +137,39 @@ describe('the white-out of a drawn box', () => {
   });
 });
 
+
+describe('outlines traced with the right button', () => {
+  const d = { entities: [], blocks: {} } as never;
+  // a rough outline around a value written at 30°
+  const a = Math.PI / 6;
+  const outline = [
+    [0, 0], [6, -1], [12, 0.5], [20, 0], [21, 4], [20, 8], [10, 8.5], [1, 8], [-1, 4],
+  ].map(([x, y]) => ({ x: 50 + x * Math.cos(a) - y * Math.sin(a), y: 20 + x * Math.sin(a) + y * Math.cos(a) }));
+
+  it('reads in the smallest rectangle around the outline, at its angle', () => {
+    const f = outlineFrame(outline);
+    // a hand-drawn outline: within a few degrees of the value's angle
+    expect(Math.abs(Math.atan2(f[1].y - f[0].y, f[1].x - f[0].x) - a)).toBeLessThan(0.1);
+    for (const p of outline) expect(pointInPoly({ x: p.x * 0.999 + polyCentreOf(f).x * 0.001, y: p.y * 0.999 + polyCentreOf(f).y * 0.001 }, f)).toBe(true);
+    // upright and sideways outlines read level and bottom to top
+    const level = outlineFrame(boxPoly({ minX: 0, maxX: 20, minY: 0, maxY: 4 }).map((p, i) => ({ x: p.x + (i % 2 ? 0.1 : 0), y: p.y })));
+    expect(Math.atan2(level[1].y - level[0].y, level[1].x - level[0].x)).toBeCloseTo(0, 9);
+    const up = outlineFrame(boxPoly({ minX: 0, maxX: 4, minY: 0, maxY: 20 }));
+    expect(Math.atan2(up[1].y - up[0].y, up[1].x - up[0].x)).toBeCloseTo(Math.PI / 2, 9);
+  });
+
+  it('whites out exactly the traced outline and replaces what lies in it', () => {
+    const f = outlineFrame(outline);
+    const edit = addBoxedText(d, [], outline, textFromBox('3 3/8"', f));
+    const boxed = edit.entities.find((e: any) => e.manual) as any;
+    expect(boxed.cover).toEqual(outline);
+    expect(Math.abs(boxed.rotation - a)).toBeLessThan(0.1);
+    convertDimension(edit.dims[0], boxed.text, IN, 'mm');
+    expect(coverPolygons(boxed, ocrPatch(boxed, edit.dims)!)).toEqual([outline]);
+    expect(polyArea(outline)).toBeGreaterThan(100);
+  });
+});
+
+function polyCentreOf(p: { x: number; y: number }[]) {
+  return { x: p.reduce((s, q) => s + q.x, 0) / p.length, y: p.reduce((s, q) => s + q.y, 0) / p.length };
+}

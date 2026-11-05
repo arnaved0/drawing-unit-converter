@@ -123,6 +123,10 @@ if __name__ == "__main__":
     if not only or "fonts" in only:
         for tag, path, wf in FONT_SAMPLES:
             outline("defrost-heater", path, os.path.join("fonts", f"defrost-{tag}.pdf"), own_spacing=True, width_factor=wf)
+    # fractional inches and feet-inches
+    if not only or "bracket" in only:
+        outline("bracket-inch")
+        outline("bracket-inch", FONT_SAMPLES[2][1], os.path.join("fonts", "bracket-osifont.pdf"), own_spacing=True)
     # diameter symbols in the common lettering styles
     if not only or "shaft" in only:
         outline("shaft-diameters")
