@@ -33,7 +33,7 @@ import { displayColor } from '../aci';
 import type { Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
-import { coverPolygons, layoutText, ocrPatch } from '../render/svg';
+import { coverPolygons, layoutText, movedPos, ocrPatch } from '../render/svg';
 
 function hexRgb(hex: string) {
   const v = parseInt(hex.replace('#', '').slice(0, 6), 16) || 0;
@@ -82,10 +82,21 @@ function polygon(page: PDFPage, pts: Pt[], color = rgb(1, 1, 1)): void {
 /** PDF input: white-out the old text, write the converted text. */
 export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   if (!d.pdf) throw new Error('No PDF source.');
+  return exportPdfPages(d.pdf.bytes, [{ d, dims }]);
+}
+
+/** PDF input with work on several pages: each page gets its converted values. */
+export async function exportPdfPages(bytes: Uint8Array, pages: { d: Drawing; dims: Dimension[] }[]): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   const warnings: string[] = [];
-  const doc = await PDFDocument.load(d.pdf.bytes, { updateMetadata: false });
-  const page = doc.getPage(d.pdf.pageIndex);
+  const doc = await PDFDocument.load(bytes, { updateMetadata: false });
   const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (const { d, dims } of pages) if (d.pdf) overlayPage(doc.getPage(d.pdf.pageIndex), font, d, dims);
+  const out = await doc.save({ useObjectStreams: false });
+  return { bytes: out, warnings };
+}
+
+function overlayPage(page: PDFPage, font: PDFFont, d: Drawing, dims: Dimension[]): void {
+  if (!d.pdf) return;
   const toUser = invert(d.pdf.userToDrawing);
   const scale = matScale(d.pdf.userToDrawing); // mm per PDF unit
   const byText = groupDims(dims.filter((x) => x.converted));
@@ -105,7 +116,7 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{
       // OCR / boxed text: cover the old value (and the whole drawn box) and write the new part
       for (const mask of coverPolygons(t, patch)) polygon(page, mask.map((p) => apply(toUser, p)));
       const w = font.widthOfTextAtSize(safe.text, size);
-      const anchor = apply(toUser, patch.pos);
+      const anchor = apply(toUser, movedPos(t, patch.pos));
       const len = Math.hypot(dirU.x, dirU.y) || 1;
       const shift = patch.align === 'center' ? -w / 2 : patch.align === 'right' ? -w : 0;
       page.drawText(safe.text, { x: anchor.x + (dirU.x / len) * shift, y: anchor.y + (dirU.y / len) * shift, size, font, color, rotate: degrees(angle) });
@@ -114,7 +125,7 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
       polygon(page, textCorners(t, -pad, 1 + pad).map((p) => apply(toUser, p)));
       const w = font.widthOfTextAtSize(safe.text, size);
-      const anchor = apply(toUser, lay.pos);
+      const anchor = apply(toUser, movedPos(t, lay.pos));
       const dirN = { x: dirU.x / Math.hypot(dirU.x, dirU.y), y: dirU.y / Math.hypot(dirU.x, dirU.y) };
       const shift = lay.align === 'center' ? -w / 2 : lay.align === 'right' ? -w : 0;
       page.drawText(safe.text, { x: anchor.x + dirN.x * shift, y: anchor.y + dirN.y * shift, size, font, color, rotate: degrees(angle) });
@@ -133,8 +144,6 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{
       }
     }
   }
-  const bytes = await doc.save({ useObjectStreams: false });
-  return { bytes, warnings };
 }
 
 // ---------------------------------------------------------------- plotting
@@ -264,7 +273,7 @@ function plotEntity(ctx: PlotCtx, e: Entity, m: Mat, depth: number): void {
       const size = e.fontSize * matScale(m);
       if (size < 0.5) break;
       const w = ctx.font.widthOfTextAtSize(safe.text, size);
-      const p = apply(m, lay.pos);
+      const p = apply(m, dims ? movedPos(e, lay.pos) : lay.pos); // moved converted text
       const shift = lay.align === 'center' ? -w / 2 : lay.align === 'right' ? -w : 0;
       ctx.page.drawText(safe.text, {
         x: p.x + (dir.x / dl) * shift,

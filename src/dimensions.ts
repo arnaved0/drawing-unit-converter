@@ -35,6 +35,17 @@ export interface Dimension extends LengthToken {
   textId: string;
   original: string;
   converted?: { text: string; key: string };
+  /** Settings for this dimension only, set in the dimension list. */
+  override?: DimensionOverride;
+}
+
+export interface DimensionOverride {
+  /** Decimal places for this dimension. */
+  decimals?: number;
+  /** Unit label for this dimension ('' = none), replacing the general one. */
+  suffix?: string;
+  /** Text typed by the user: used as the converted text as it is. */
+  text?: string;
 }
 
 const UNIT_RE = /^(\s?)(mm|cm|m|inches|inch|in\.?|"|\u201d|\u2033|ft\.?|feet|'|\u2019|\u2032)(?![a-z])/;
@@ -182,15 +193,21 @@ export function detectDimensions(drawing: Drawing): Dimension[] {
   return dims;
 }
 
-/** Text that replaces dimension `d` under `settings`. */
+/** Text that replaces dimension `d` under `settings` (its own overrides applied). */
 export function replacementText(d: Dimension, fullText: string, s: ConversionSettings, defaultUnit: LengthUnit): string {
+  const o = d.override ?? {};
+  if (o.text !== undefined) return o.text;
+  const settings = o.decimals !== undefined ? { ...s, decimals: o.decimals } : s;
   const mm = toMm(d.value, d.unit ?? defaultUnit);
-  const f = formatLength(mm, s);
+  const f = formatLength(mm, settings);
   let out = d.comma ? f.number.replace('.', ',') : f.number;
-  if (d.noLabel) return out;
-  if (f.label) {
-    const sep = f.symbol ? '' : d.unit ? (d.spaced ? ' ' : '') : ' ';
-    out += sep + f.label;
+  if (d.noLabel && o.suffix === undefined) return out;
+  // a suffix chosen for this dimension replaces the label ('' = none)
+  const label = o.suffix !== undefined ? o.suffix : f.label;
+  const symbol = o.suffix !== undefined ? /^["'\u2033\u2032]$/.test(o.suffix) : f.symbol;
+  if (label) {
+    const sep = symbol ? '' : d.unit ? (d.spaced ? ' ' : '') : ' ';
+    out += sep + label;
   }
   if (/^[A-Za-z]/.test(fullText.slice(d.end))) out += ' '; // "8mmDia" -> "0.31 in Dia"
   return out;

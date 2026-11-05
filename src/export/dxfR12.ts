@@ -6,7 +6,7 @@ import { hexToAci } from '../aci';
 import { flattenSegs, normAngle } from '../geom';
 import type { Dimension } from '../dimensions';
 import type { Drawing, Entity, Pt, Style, TextEntity } from '../model';
-import { layoutText } from '../render/svg';
+import { layoutText, movedPos } from '../render/svg';
 import { TEXT_OUTLINES } from '../model';
 import { encodeR12Text } from '../textcodes';
 
@@ -153,7 +153,8 @@ function entity(ctx: Ctx, e: Entity, dimsByText: Map<string, Dimension[]>): void
     case 'text': {
       const dims = dimsByText.get(e.id);
       const lay = dims ? layoutText(e, dims) : null;
-      text(ctx, e, lay ? lay.text : e.text, lay ? lay.pos : e.pos, lay ? lay.align : e.align);
+      const moved = lay?.display.changed ? movedPos(e, lay.pos) : null;
+      text(ctx, e, lay ? lay.text : e.text, moved ?? (lay ? lay.pos : e.pos), lay ? lay.align : e.align);
       break;
     }
     case 'image': {
