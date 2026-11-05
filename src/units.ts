@@ -8,7 +8,17 @@ export const MM_PER: Record<LengthUnit, number> = {
   ft: 304.8,
 };
 
-export type TargetFormat = 'mm' | 'cm' | 'm' | 'in' | 'in-frac' | 'ft' | 'ft-in';
+export type TargetFormat = 'mm' | 'cm' | 'm' | 'in' | 'in-frac' | 'ft' | 'ft-in' | 'custom';
+
+/** A conversion the user defines: new value = original value × factor. */
+export interface CustomUnit {
+  /** Suffix the drawing writes after original values ("mm", "u"); values without a suffix count too. */
+  from: string;
+  /** Factor as typed: a number or a fraction ("39.37", "1/25.4"). */
+  factor: string;
+  /** Suffix written after converted values. */
+  to: string;
+}
 
 export interface ConversionSettings {
   target: TargetFormat;
@@ -22,6 +32,8 @@ export interface ConversionSettings {
   inchLabel: 'in' | '"';
   /** Remove trailing zeros (3.50 -> 3.5). */
   trimZeros: boolean;
+  /** Used when target is 'custom'. */
+  custom: CustomUnit;
 }
 
 export const DEFAULT_SETTINGS: ConversionSettings = {
@@ -31,6 +43,7 @@ export const DEFAULT_SETTINGS: ConversionSettings = {
   showUnit: true,
   inchLabel: 'in',
   trimZeros: false,
+  custom: { from: 'mm', factor: '39.37', to: 'mil' },
 };
 
 export const TARGET_LABELS: Record<TargetFormat, string> = {
@@ -41,13 +54,29 @@ export const TARGET_LABELS: Record<TargetFormat, string> = {
   'in-frac': 'Inches, fractional',
   ft: 'Feet, decimal',
   'ft-in': 'Feet and inches',
+  custom: 'Custom…',
 };
+
+/** "39.37" -> 39.37, "1/25.4" -> 0.03937…; null unless a positive, finite number. */
+export function parseFactor(text: string): number | null {
+  const t = text.trim().replace(',', '.');
+  const m = /^([0-9]*\.?[0-9]+(?:e[-+]?\d+)?)(?:\s*\/\s*([0-9]*\.?[0-9]+(?:e[-+]?\d+)?))?$/i.exec(t);
+  if (!m) return null;
+  const v = m[2] !== undefined ? parseFloat(m[1]) / parseFloat(m[2]) : parseFloat(m[1]);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/** A custom value: the number and the new suffix. */
+export function formatCustom(value: number, s: ConversionSettings): FormattedValue {
+  const to = s.custom.to.trim();
+  return { number: fixed(value, s.decimals, s.trimZeros), label: s.showUnit ? to : '', symbol: /^["'\u2033\u2032\u00b0]$/.test(to) };
+}
 
 export function toMm(value: number, unit: LengthUnit): number {
   return value * MM_PER[unit];
 }
 
-function fixed(v: number, decimals: number, trim: boolean): string {
+export function fixed(v: number, decimals: number, trim: boolean): string {
   let s = v.toFixed(Math.max(0, Math.min(6, decimals)));
   if (trim && s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
   if (/^-0(\.0*)?$/.test(s)) s = s.slice(1);
@@ -99,6 +128,9 @@ export function formatLength(mm: number, s: ConversionSettings): FormattedValue 
       return { number: fraction(inch, s.denominator), ...(s.showUnit ? inLabel : { label: '', symbol: false }) };
     case 'ft':
       return { number: fixed(mm / MM_PER.ft, s.decimals, s.trimZeros), label: s.showUnit ? 'ft' : '', symbol: false };
+    case 'custom':
+      // a custom value is not a length in mm: see formatCustom
+      return formatCustom(mm, s);
     case 'ft-in': {
       const totalUnits = Math.round(inch * s.denominator);
       const perFoot = 12 * s.denominator;
@@ -113,5 +145,6 @@ export function formatLength(mm: number, s: ConversionSettings): FormattedValue 
 
 /** Stable key so a repeated click with identical settings can toggle a conversion off. */
 export function settingsKey(s: ConversionSettings): string {
-  return [s.target, s.decimals, s.denominator, s.showUnit, s.inchLabel, s.trimZeros].join('|');
+  const custom = s.target === 'custom' ? [s.custom.from, s.custom.factor, s.custom.to] : [];
+  return [s.target, s.decimals, s.denominator, s.showUnit, s.inchLabel, s.trimZeros, ...custom].join('|');
 }

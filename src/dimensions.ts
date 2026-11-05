@@ -10,7 +10,7 @@
 // are left alone ("112°", '3/4"NPT', "#10-32", "(X8)", "480V", "304SS").
 
 import type { Drawing, Entity, LengthUnit, TextEntity } from './model';
-import { formatLength, settingsKey, toMm, type ConversionSettings } from './units';
+import { formatCustom, formatLength, MM_PER, parseFactor, settingsKey, toMm, type ConversionSettings, type CustomUnit } from './units';
 
 export type DimKind = 'linear' | 'radius' | 'diameter';
 
@@ -28,6 +28,8 @@ export interface LengthToken {
   noLabel?: boolean;
   /** Written with a decimal comma ("1504,68"): the converted value keeps it. */
   comma?: boolean;
+  /** The custom unit's suffix written after the value ("12 u"); unit is then null. */
+  suffix?: string;
 }
 
 export interface Dimension extends LengthToken {
@@ -40,10 +42,6 @@ export interface Dimension extends LengthToken {
 }
 
 export interface DimensionOverride {
-  /** Decimal places for this dimension. */
-  decimals?: number;
-  /** Unit label for this dimension ('' = none), replacing the general one. */
-  suffix?: string;
   /** Text typed by the user: used as the converted text as it is. */
   text?: string;
   /** Diameter sign in front of the converted value: true = add it, false = take it out. */
@@ -97,7 +95,17 @@ interface Candidate extends LengthToken {
   hasUnit: boolean;
 }
 
-function scan(text: string): Candidate[] {
+/** A standard unit written as `suffix` ("mm", "in", '"'), or null for a suffix of the user's own. */
+export function knownUnit(suffix: string): LengthUnit | null {
+  const t = suffix.trim();
+  return UNIT_OF[t] ?? UNIT_OF[t.toLowerCase()] ?? null;
+}
+
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+function scan(text: string, customSuffix?: string): Candidate[] {
+  // a suffix of the user's own counts as a unit ("12 u", "3pt")
+  const own = customSuffix?.trim() && !knownUnit(customSuffix) ? new RegExp(`^(\\s?)(${escRe(customSuffix.trim())})(?![A-Za-z])`, 'i') : null;
   const out: Candidate[] = [];
   const re = /\d+(?:\.\s?\d+)?|\.\d+/g;
   let m: RegExpExecArray | null;
@@ -121,15 +129,22 @@ function scan(text: string): Candidate[] {
     let unit: LengthUnit | null = null;
     let spaced = false;
     let end = e;
-    const um = UNIT_RE.exec(rest);
-    if (um) {
+    let suffix: string | undefined;
+    const om = own?.exec(rest);
+    const um = om ? null : UNIT_RE.exec(rest);
+    if (om) {
+      suffix = om[2];
+      spaced = om[1].length > 0;
+      end = e + om[0].length;
+      rest = text.slice(end);
+    } else if (um) {
       unit = UNIT_OF[um[2]];
       spaced = um[1].length > 0;
       end = e + um[0].length;
       rest = text.slice(end);
     }
     if (DEGREE_RE.test(rest)) continue;
-    if (unit === null) {
+    if (unit === null && !suffix) {
       if (/^[A-Za-z%]/.test(rest) && !/^[xX\u00d7]\s?\d/.test(rest)) continue; // 120V, 304SS, 18UNF, 8X
       if (/^\s?[-:/]\s?\d/.test(rest)) continue; // ranges, dates, ratios
     } else {
@@ -139,7 +154,7 @@ function scan(text: string): Candidate[] {
     const value = parseFloat(m[0].replace(/\s/g, ''));
     // a length of 0 is never a dimension (usually a circle or "O" read as a digit)
     if (!Number.isFinite(value) || value === 0) continue;
-    out.push({ start: s, end, value, unit, spaced, kind: kindFromPrefix(before), hasUnit: unit !== null });
+    out.push({ start: s, end, value, unit, spaced, kind: kindFromPrefix(before), hasUnit: unit !== null || !!suffix, ...(suffix ? { suffix } : {}) });
   }
   // "100x50mm": the first value of a size takes the unit of the second.
   for (let i = out.length - 2; i >= 0; i--) {
@@ -158,6 +173,8 @@ export interface TokenContext {
   /** Text of a real DIMENSION entity: bare numbers are lengths. */
   isDimension?: boolean;
   dimType?: TextEntity['dimType'];
+  /** The custom unit's original suffix: values written with it are lengths too. */
+  customSuffix?: string;
 }
 
 export function findLengthTokens(text: string, ctx: TokenContext = {}): LengthToken[] {
@@ -169,7 +186,7 @@ export function findLengthTokens(text: string, ctx: TokenContext = {}): LengthTo
     const kind: DimKind = ctx.dimType === 'radius' || ctx.dimType === 'diameter' ? ctx.dimType : 'linear';
     return [{ start: s, end: s + comma[1].length + 1 + comma[2].length, value: parseFloat(`${comma[1]}.${comma[2]}`), unit: null, spaced: false, kind, comma: true }];
   }
-  const cands = scan(text);
+  const cands = scan(text, ctx.customSuffix);
   let leftover = '';
   let pos = 0;
   for (const c of cands) {
@@ -204,12 +221,12 @@ export function isStandaloneDimension(text: string, dims: { start: number; end: 
 let dimCounter = 0;
 
 /** Finds every convertible length in the model-space text of a drawing. */
-export function detectDimensions(drawing: Drawing): Dimension[] {
+export function detectDimensions(drawing: Drawing, opts: { customSuffix?: string } = {}): Dimension[] {
   const dims: Dimension[] = [];
   const visit = (entities: Entity[]) => {
     for (const e of entities) {
       if (e.kind !== 'text') continue;
-      for (const t of findLengthTokens(e.text, { isDimension: e.isDimension, dimType: e.dimType })) {
+      for (const t of findLengthTokens(e.text, { isDimension: e.isDimension, dimType: e.dimType, customSuffix: opts.customSuffix })) {
         dimCounter += 1;
         dims.push({ ...t, id: `d${dimCounter}`, textId: e.id, original: e.text.slice(t.start, t.end) });
       }
@@ -225,20 +242,44 @@ export function replacementText(d: Dimension, fullText: string, s: ConversionSet
   // the sign in front, when the user chose to add it (or keep it while it is replaced with the value)
   const sign = o.diameter === true ? (diameterSignBefore(fullText, d.start)?.sign ?? '\u00d8') : '';
   if (o.text !== undefined) return o.text.startsWith(sign.trim()) ? o.text : sign + o.text;
-  const settings = o.decimals !== undefined ? { ...s, decimals: o.decimals } : s;
-  const mm = toMm(d.value, d.unit ?? defaultUnit);
-  const f = formatLength(mm, settings);
+  let f;
+  if (s.target === 'custom') {
+    const v = customValue(d, s.custom);
+    if (v === null) return fullText.slice(d.start, d.end); // not in the original unit: left as it is
+    f = formatCustom(v, s);
+  } else f = formatLength(toMm(d.value, d.unit ?? defaultUnit), s);
   let out = sign + (d.comma ? f.number.replace('.', ',') : f.number);
-  if (d.noLabel && o.suffix === undefined) return out;
-  // a suffix chosen for this dimension replaces the label ('' = none)
-  const label = o.suffix !== undefined ? o.suffix : f.label;
-  const symbol = o.suffix !== undefined ? /^["'\u2033\u2032]$/.test(o.suffix) : f.symbol;
-  if (label) {
-    const sep = symbol ? '' : d.unit ? (d.spaced ? ' ' : '') : ' ';
-    out += sep + label;
+  if (d.noLabel) return out;
+  if (f.label) {
+    const sep = f.symbol ? '' : d.unit || d.suffix ? (d.spaced ? ' ' : '') : ' ';
+    out += sep + f.label;
   }
   if (/^[A-Za-z]/.test(fullText.slice(d.end))) out += ' '; // "8mmDia" -> "0.31 in Dia"
   return out;
+}
+
+/**
+ * A value in the custom unit: original value × factor. Values without a unit
+ * and values written with the original suffix are in the original unit. When
+ * that suffix is a standard unit ("mm"), values in other standard units are
+ * converted to it first. Null when the value is in another unit, or the factor
+ * is not a number.
+ */
+export function customValue(d: LengthToken, c: CustomUnit): number | null {
+  const factor = parseFactor(c.factor);
+  if (factor === null) return null;
+  const from = knownUnit(c.from);
+  if (d.suffix !== undefined || d.unit === null) return d.value * factor;
+  if (from) return (toMm(d.value, d.unit) / MM_PER[from]) * factor;
+  return null;
+}
+
+/** Whether `d` can be converted with `s` (in custom mode: only values in the original unit). */
+export function canConvert(d: Dimension, s: ConversionSettings): boolean {
+  if (d.override?.text !== undefined) return true;
+  // a value in a unit of the user's own ("12 u") only converts with the custom unit
+  if (s.target !== 'custom') return d.suffix === undefined;
+  return customValue(d, s.custom) !== null;
 }
 
 export function convertDimension(d: Dimension, fullText: string, s: ConversionSettings, defaultUnit: LengthUnit): void {

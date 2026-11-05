@@ -65,17 +65,24 @@
               Settings
             </button>
           </div>
-          <label class="field">
+          <label class="field" id="source-field">
             <span>Original unit</span>
             <select id="source-unit">
               <option value="mm">Millimetres (mm)</option><option value="cm">Centimetres (cm)</option><option value="m">Metres (m)</option><option value="in">Inches (in)</option><option value="ft">Feet (ft)</option>
             </select>
           </label>
-          <div class="to" aria-hidden="true">to</div>
+          <div class="to" id="to-sep" aria-hidden="true">to</div>
           <label class="field">
             <span>New unit</span>
             <select id="target"></select>
           </label>
+          <div class="custom-unit" id="custom-unit" hidden>
+            <span class="cu-one">1</span>
+            <label><span>Original suffix</span><input id="custom-from" type="text" autocomplete="off" spellcheck="false" placeholder="mm" /></label>
+            <span class="cu-eq">=</span>
+            <label><span>Factor</span><input id="custom-factor" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="39.37" title="A number or a fraction, for example 39.37 or 1/25.4" /></label>
+            <label><span>New suffix</span><input id="custom-to" type="text" autocomplete="off" spellcheck="false" placeholder="mil" /></label>
+          </div>
           <p class="example" id="example"></p>
           <p class="hint" id="source-hint"></p>
         </section>
