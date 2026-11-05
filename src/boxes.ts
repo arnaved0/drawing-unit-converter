@@ -38,21 +38,55 @@ export function textFromPlacement(text: string, p: Placement, color: string, rea
   };
 }
 
+/** Corners of an axis-aligned box: bottom-left, bottom-right, top-right, top-left. */
+export function boxPoly(b: Box): Pt[] {
+  return [
+    { x: b.minX, y: b.minY },
+    { x: b.maxX, y: b.minY },
+    { x: b.maxX, y: b.maxY },
+    { x: b.minX, y: b.maxY },
+  ];
+}
+
+/** Centre of a polygon (average of its corners). */
+export function polyCentre(poly: Pt[]): Pt {
+  return { x: poly.reduce((s, p) => s + p.x, 0) / poly.length, y: poly.reduce((s, p) => s + p.y, 0) / poly.length };
+}
+
+/** `poly` turned by `angle` radians (counter-clockwise) around its centre. */
+export function rotatePoly(poly: Pt[], angle: number): Pt[] {
+  const c = polyCentre(poly);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return poly.map((p) => ({ x: c.x + (p.x - c.x) * cos - (p.y - c.y) * sin, y: c.y + (p.x - c.x) * sin + (p.y - c.y) * cos }));
+}
+
+/** Angle of a box: direction of its bottom edge (corner 0 to corner 1). */
+export function polyAngle(poly: Pt[]): number {
+  return Math.atan2(poly[1].y - poly[0].y, poly[1].x - poly[0].x);
+}
+
 /** Text filling a box when nothing was read in it: along the longer side (vertical boxes read bottom to top). */
-export function textFromBox(text: string, b: Box, color = '#000000'): TextEntity {
-  const w = b.maxX - b.minX;
-  const h = b.maxY - b.minY;
+export function textFromBox(text: string, b: Box | Pt[], color = '#000000'): TextEntity {
+  // worked out in the box's own frame (corner 0 at the origin, bottom edge along x), then turned with it
+  const poly = Array.isArray(b) ? b : boxPoly(b);
+  const angle = polyAngle(poly);
+  const w = Math.hypot(poly[1].x - poly[0].x, poly[1].y - poly[0].y);
+  const h = Math.hypot(poly[3].x - poly[0].x, poly[3].y - poly[0].y);
   const vertical = h > w * 1.2;
   const size = (vertical ? w : h) * 0.75;
   const len = vertical ? h : w;
+  const local = vertical ? { x: w - w * 0.22, y: 0 } : { x: 0, y: h * 0.22 };
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
   return {
     kind: 'text',
     id: newId('box'),
     style: { layer: 'TEXT', color },
     text,
-    pos: vertical ? { x: b.maxX - (vertical ? w : h) * 0.22, y: b.minY } : { x: b.minX, y: b.minY + h * 0.22 },
+    pos: { x: poly[0].x + local.x * cos - local.y * sin, y: poly[0].y + local.x * sin + local.y * cos },
     fontSize: size,
-    rotation: vertical ? Math.PI / 2 : 0,
+    rotation: angle + (vertical ? Math.PI / 2 : 0),
     width: len,
     widthExact: false,
     align: 'left',
@@ -96,13 +130,9 @@ export interface BoxEdit {
  * (the box corrects them), and OCR texts that lie wholly inside it are dropped
  * so the DXF does not get the same text twice.
  */
-export function addBoxedText(d: Drawing, dims: Dimension[], box: Box, t: TextEntity, customSuffix?: string): BoxEdit {
-  const poly = [
-    { x: box.minX, y: box.minY },
-    { x: box.maxX, y: box.minY },
-    { x: box.maxX, y: box.maxY },
-    { x: box.minX, y: box.maxY },
-  ];
+export function addBoxedText(d: Drawing, dims: Dimension[], box: Box | Pt[], t: TextEntity, customSuffix?: string): BoxEdit {
+  // a box the user drew, possibly turned to follow an angled dimension
+  const poly = Array.isArray(box) ? box : boxPoly(box);
   const inside = (p: Pt | null) => !!p && pointInPoly(p, poly);
   const replaced = dims.filter((x) => inside(dimensionCentre(d, x)));
   const drop = new Set(

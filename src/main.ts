@@ -2,7 +2,7 @@ import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
-import { addBoxedText, textFromBox, textFromPlacement, type Placement } from './boxes';
+import { addBoxedText, boxPoly, polyAngle, polyCentre, rotatePoly, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
@@ -11,7 +11,7 @@ import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs, type TextStyleHint } from './importers/pdf';
 import type { Box, Drawing, Entity, LengthUnit, Pt, TextEntity } from './model';
-import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
+import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry, rotateHandlePoint, rotateHandleSvg } from './render/svg';
 import { matchFonts, normaliseOcrText, placeFit, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, type Face } from './fonts/faces';
 import { canvasRenderer } from './fonts/match';
@@ -343,21 +343,26 @@ const NEAR_PX = 28;
 function updateHandles(): void {
   const s = Math.max(view.w / (svg.clientWidth || 1), view.h / (svg.clientHeight || 1));
   const pad = NEAR_PX * s;
-  const handles = [...overlayLayer.querySelectorAll<SVGGElement>('.handle')];
+  const handles = [...overlayLayer.querySelectorAll<SVGGElement>(':scope > .handle')];
+  // the move and rotate handles of one text go together
+  const key = (h: SVGGElement) => h.dataset.handle ?? h.dataset.rotate ?? '';
   // distance from the pointer to each value's area (0 inside); SVG y is the negated drawing y
-  const dist = handles.map((h) => {
-    if (!pointer) return Infinity;
+  const dist = new Map<string, number>();
+  for (const h of handles) {
+    if (!pointer) continue;
     const [x0, y0, x1, y1] = (h.dataset.near ?? '').split(' ').map(Number);
     const dx = Math.max(x0 - pointer.x, 0, pointer.x - x1);
     const dy = Math.max(y0 + pointer.y, 0, -pointer.y - y1);
-    return Math.hypot(dx, dy);
-  });
-  // only the nearest value's handle (or every value the pointer is inside)
-  const best = Math.min(...dist);
-  handles.forEach((h, k) => {
-    const show = moving ? moving.text.id === h.dataset.handle : dist[k] <= pad && (dist[k] === 0 || dist[k] === best);
+    dist.set(key(h), Math.min(dist.get(key(h)) ?? Infinity, Math.hypot(dx, dy)));
+  }
+  // only the nearest value's handles (or every value the pointer is inside)
+  const best = Math.min(...dist.values());
+  for (const h of handles) {
+    const d = dist.get(key(h)) ?? Infinity;
+    const active = moving?.text.id ?? (rotating ? '' : null);
+    const show = active !== null ? active === h.dataset.handle : d <= pad && (d === 0 || d === best);
     h.classList.toggle('near', show);
-  });
+  }
 }
 
 function renderDynamic(): void {
@@ -563,10 +568,55 @@ svg.addEventListener('pointerleave', () => {
   pointer = null;
   if (!moving) updateHandles();
 });
+/** A drawn box being turned with its rotate handle. */
+let rotating: { text: TextEntity; c: Pt; a0: number; delta: number; id: number; preview: SVGGElement } | null = null;
+
+/** Pointer position in drawing coordinates (SVG y is the negated drawing y). */
+function pointerDrawing(ev: PointerEvent): Pt {
+  const p = clientToSvg(ev.clientX, ev.clientY);
+  return { x: p.x, y: -p.y };
+}
+
+/** Box angle after turning by `delta`: close to upright or sideways snaps there; Shift turns in 15° steps. */
+function snapTurn(start: number, delta: number, shift: boolean): number {
+  const a = start + delta;
+  const step = shift ? Math.PI / 12 : Math.PI / 2;
+  const snapped = Math.round(a / step) * step;
+  return (shift || Math.abs(a - snapped) < (3 * Math.PI) / 180 ? snapped : a) - start;
+}
+
+function drawRotatePreview(r: NonNullable<typeof rotating>): void {
+  const cover = rotatePoly(r.text.cover!, r.delta);
+  const deg = Math.round(((((polyAngle(cover) * 180) / Math.PI) % 360) + 540) % 360) - 180;
+  const { p, angle } = rotateHandlePoint(cover);
+  r.preview.innerHTML =
+    `<polygon points="${cover.map((q) => `${q.x},${q.y}`).join(' ')}"/>` +
+    rotateHandleSvg(r.text.id, cover, ' near') +
+    `<g transform="translate(${p.x} ${p.y}) rotate(${(angle * 180) / Math.PI})"><g class="handle-in"><text x="12" y="-18" transform="scale(1 -1)">${deg}°</text></g></g>`;
+}
+
 svg.addEventListener('pointerdown', (ev) => {
   // a tap (touch screens have no hover) shows the handles near it
   pointer = clientToSvg(ev.clientX, ev.clientY);
   updateHandles();
+  const rot = (ev.target as Element).closest?.('.handle.near[data-rotate]') as SVGElement | null;
+  if (rot && ev.button === 0) {
+    const t = textOf(rot.dataset.rotate!);
+    if (t?.cover?.length === 4) {
+      ev.preventDefault();
+      const c = polyCentre(t.cover);
+      const p = pointerDrawing(ev);
+      const preview = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      preview.setAttribute('class', 'rot-preview');
+      overlayLayer.appendChild(preview);
+      rotating = { text: t, c, a0: Math.atan2(p.y - c.y, p.x - c.x), delta: 0, id: ev.pointerId, preview };
+      drawRotatePreview(rotating);
+      svg.setPointerCapture(ev.pointerId);
+      svg.classList.add('rotating');
+      updateHandles();
+      return;
+    }
+  }
   const handle = (ev.target as Element).closest?.('.handle.near[data-handle]') as SVGElement | null;
   if (handle && ev.button === 0) {
     const t = textOf(handle.dataset.handle!);
@@ -593,6 +643,15 @@ svg.addEventListener('pointerdown', (ev) => {
 });
 svg.addEventListener('pointermove', (ev) => {
   pointer = clientToSvg(ev.clientX, ev.clientY);
+  if (rotating && rotating.id === ev.pointerId) {
+    const p = pointerDrawing(ev);
+    const a = Math.atan2(p.y - rotating.c.y, p.x - rotating.c.x);
+    let delta = a - rotating.a0;
+    delta = Math.atan2(Math.sin(delta), Math.cos(delta)); // -180°..180°
+    rotating.delta = snapTurn(polyAngle(rotating.text.cover!), delta, ev.shiftKey);
+    drawRotatePreview(rotating);
+    return;
+  }
   if (!moving && !pick && !drag?.moved) updateHandles();
   if (moving && moving.id === ev.pointerId) {
     const p = clientToSvg(ev.clientX, ev.clientY);
@@ -631,6 +690,16 @@ svg.addEventListener('pointermove', (ev) => {
   applyView();
 });
 svg.addEventListener('pointerup', (ev) => {
+  if (rotating && rotating.id === ev.pointerId) {
+    const r = rotating;
+    rotating = null;
+    r.preview.remove();
+    svg.classList.remove('rotating');
+    updateHandles();
+    // read the text again in the turned box (a tiny turn is a slip)
+    if (Math.abs(r.delta) > (0.5 * Math.PI) / 180) void placeBox(rotatePoly(r.text.cover!, r.delta), r.text);
+    return;
+  }
   if (moving && moving.id === ev.pointerId) {
     const m = moving;
     moving = null;
@@ -661,6 +730,11 @@ svg.addEventListener('pointerup', (ev) => {
   else toggleDimension(target.dataset.dim);
 });
 svg.addEventListener('pointercancel', () => {
+  if (rotating) {
+    rotating.preview.remove();
+    rotating = null;
+    svg.classList.remove('rotating');
+  }
   moving = null;
   pointer = null;
   updateHandles();
@@ -884,7 +958,7 @@ function pageStyle(d: Drawing): BoxStyle | undefined {
 }
 
 /** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
-async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placement: Placement; color: string; style?: BoxStyle } | null> {
+async function readBoxText(d: Drawing, poly: Pt[]): Promise<{ text: string; placement: Placement; color: string; style?: BoxStyle } | null> {
   if (!d.pdf) return null;
   const toUser = invert(d.pdf.userToDrawing);
   const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
@@ -892,29 +966,33 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
     const doc = await task.promise;
     const page = await doc.getPage(d.pdf.pageIndex + 1);
     // 200 dpi like the page pass; small boxes are rendered finer
-    const boxMm = Math.min(box.maxX - box.minX, box.maxY - box.minY);
+    const side = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.hypot(b.x - a.x, b.y - a.y);
+    const boxMm = Math.min(side(poly[0], poly[1]), side(poly[0], poly[3]));
     const pxPerMm = Math.min(24, Math.max(200 / 25.4, 40 / Math.max(boxMm, 0.5)));
     const vp = page.getViewport({ scale: (pxPerMm * 25.4) / 72 });
-    const corners = [
-      { x: box.minX, y: box.minY },
-      { x: box.maxX, y: box.maxY },
-      { x: box.minX, y: box.maxY },
-      { x: box.maxX, y: box.minY },
-    ].map((p) => {
+    // corners in page pixels (y down): bottom-left, bottom-right, top-right, top-left
+    const q = poly.map((p) => {
       const u = apply(toUser, p);
-      return vp.convertToViewportPoint(u.x, u.y) as number[];
+      const [x, y] = vp.convertToViewportPoint(u.x, u.y) as number[];
+      return { x, y };
     });
-    const pad = Math.round(Math.max(8, Math.min(...[0, 1].map((k) => Math.max(...corners.map((c) => c[k])) - Math.min(...corners.map((c) => c[k])))) * 0.2));
-    const x0 = Math.floor(Math.min(...corners.map((c) => c[0]))) - pad;
-    const y0 = Math.floor(Math.min(...corners.map((c) => c[1]))) - pad;
-    const w = Math.ceil(Math.max(...corners.map((c) => c[0]))) + pad - x0;
-    const h = Math.ceil(Math.max(...corners.map((c) => c[1]))) + pad - y0;
+    // The box is rendered upright, whatever its angle: its own frame becomes the
+    // image's (ex along the bottom edge, ey from the top edge down).
+    const W = side(q[0], q[1]);
+    const H = side(q[3], q[0]);
+    const ex = { x: (q[1].x - q[0].x) / W, y: (q[1].y - q[0].y) / W };
+    const ey = { x: (q[0].x - q[3].x) / H, y: (q[0].y - q[3].y) / H };
+    const pad = Math.round(Math.max(8, Math.min(W, H) * 0.2));
+    const w = Math.ceil(W) + 2 * pad;
+    const h = Math.ceil(H) + 2 * pad;
     if (w * h > 16e6) return null;
+    const tl = q[3];
     const canvas = Object.assign(document.createElement('canvas'), { width: w, height: h });
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, w, h);
-    await page.render({ canvasContext: ctx, viewport: vp, canvas, transform: [1, 0, 0, 1, -x0, -y0] } as never).promise;
+    const transform = [ex.x, ey.x, ex.y, ey.y, pad - (ex.x * tl.x + ex.y * tl.y), pad - (ey.x * tl.x + ey.y * tl.y)];
+    await page.render({ canvasContext: ctx, viewport: vp, canvas, transform } as never).promise;
     const img = ctx.getImageData(0, 0, w, h);
     const lines = await recogniseInWorker({ width: w, height: h, data: img.data.slice() }, pxPerMm, pad);
     if (!lines.length) return null;
@@ -928,8 +1006,11 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
       .map((l) => ({ l, text: normaliseOcrText(l.text) ?? l.text }))
       .sort((a, b) => holds(b.text) - holds(a.text) || b.l.confidence - a.l.confidence);
     const best = { ...scored[0] };
+    // image pixels -> page pixels -> drawing
     const map = (x: number, y: number): [number, number] => {
-      const [ux, uy] = vp.convertToPdfPoint(x + x0, y + y0) as number[];
+      const px = tl.x + ex.x * (x - pad) + ey.x * (y - pad);
+      const py = tl.y + ex.y * (x - pad) + ey.y * (y - pad);
+      const [ux, uy] = vp.convertToPdfPoint(px, py) as number[];
       const p = apply(d.pdf!.userToDrawing, { x: ux, y: uy });
       return [p.x, p.y];
     };
@@ -957,12 +1038,16 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
 }
 
 /** Asks the user to confirm or type the text of a box. Resolves null on cancel. */
-function askBoxText(read: string | null): Promise<string | null> {
+function askBoxText(read: string | null, previous?: string): Promise<string | null> {
   const dlg = $<HTMLDialogElement>('box-dialog');
   const input = $<HTMLInputElement>('box-text');
   $('box-read').textContent =
-    read === null ? 'Nothing could be read in the box. Type the value as it appears on the drawing.' : 'Read from the drawing. Correct it if needed.';
-  input.value = read ?? '';
+    read !== null
+      ? 'Read from the drawing. Correct it if needed.'
+      : previous !== undefined
+        ? 'Nothing could be read in the turned box. This is the text it had: correct it if needed.'
+        : 'Nothing could be read in the box. Type the value as it appears on the drawing.';
+  input.value = read ?? previous ?? '';
   // Ø is not on most keyboards
   $('box-dia').onclick = () => {
     const a = input.selectionStart ?? input.value.length;
@@ -988,32 +1073,44 @@ function askBoxText(read: string | null): Promise<string | null> {
 }
 
 async function addBox(box: Box): Promise<void> {
-  const d = state.drawing;
-  if (!d) return;
   if (box.maxX - box.minX < 0.3 || box.maxY - box.minY < 0.3) {
     toast('Drag a box around the dimension (the box was too small).', false, 3500);
     return;
   }
+  await placeBox(boxPoly(box));
+}
+
+/**
+ * Reads the text in a box (any angle), asks the user to confirm it and adds
+ * it. `replacing` is a box being turned: it is taken out, its text is offered
+ * when nothing is read, and a conversion it had is redone.
+ */
+async function placeBox(poly: Pt[], replacing?: TextEntity): Promise<void> {
+  const d = state.drawing;
+  if (!d) return;
   let read: Awaited<ReturnType<typeof readBoxText>> = null;
   if (d.pdf) {
     busy('Reading the text in the box…');
     try {
-      read = await readBoxText(d, box);
+      read = await readBoxText(d, poly);
     } catch (err) {
       console.warn(err);
     } finally {
       busy(null);
     }
   }
-  const typed = await askBoxText(read?.text ?? null);
+  const typed = await askBoxText(read?.text ?? null, replacing?.text);
   if (typed === null) return;
   // AutoCAD's code for the diameter sign, as some users type it
   const text = typed.replace(/%%c/gi, '\u00d8');
-  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, box);
+  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, poly, replacing?.style.color);
   // written like the letters in the box (or, when none were read, like the page's other text)
-  Object.assign(t, read?.style ?? pageStyle(d) ?? {});
+  Object.assign(t, read?.style ?? (replacing ? { face: replacing.face, hscale: replacing.hscale, slant: replacing.slant } : pageStyle(d)) ?? {});
   if (t.face) t.width = advance(getFace(t.face), text) * t.fontSize * (t.hscale ?? 1);
-  const edit = addBoxedText(d, state.dims, box, t, customSuffix());
+  // a box being turned: its old self goes, with its values
+  const oldDims = replacing ? state.dims.filter((x) => x.textId === replacing.id) : [];
+  const base = replacing ? { ...d, entities: d.entities.filter((e) => e.id !== replacing.id) } : d;
+  const edit = addBoxedText(base, state.dims.filter((x) => !oldDims.includes(x)), poly, t, customSuffix());
   const added = edit.dims.filter((x) => x.textId === t.id);
   if (!added.length) {
     const c = state.settings.custom;
@@ -1031,6 +1128,21 @@ async function addBox(box: Box): Promise<void> {
   state.dims = edit.dims;
   for (const id of edit.replaced) state.used.delete(id);
   addCustomDimensions(); // "12 u" boxed: the custom suffix belongs to the value
+  // a turned box that was converted stays converted, with the same settings
+  const was = oldDims.find((x) => x.converted);
+  if (was) {
+    const used = state.used.get(was.id) ?? state.settings;
+    for (const x of state.dims.filter((y) => y.textId === t.id)) convert(x, used);
+  }
+  for (const x of oldDims) state.used.delete(x.id);
+  if (replacing) {
+    d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
+    renderStatic();
+    renderDynamic();
+    const deg = Math.round(((((polyAngle(poly) * 180) / Math.PI) % 360) + 360) % 360);
+    toast(`Turned the box to ${deg > 180 ? deg - 360 : deg}°.`, false, 6000, { label: 'Undo', run: undo });
+    return;
+  }
   d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
   renderStatic();
   renderDynamic();

@@ -178,3 +178,12 @@ text.t { pointer-events: none; }
 .custom-unit input { font: inherit; font-size: 14px; color: var(--text); padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; width: 100%; box-sizing: border-box; }
 .custom-unit input[aria-invalid="true"] { border-color: #c0392b; background: #fff5f4; }
 .custom-unit .cu-one, .custom-unit .cu-eq { font-size: 14px; padding-bottom: 7px; color: var(--muted); }
+
+/* rotate handle of a drawn box */
+#overlays .handle.rot { cursor: grab; }
+#overlays .handle.rot line { stroke: var(--accent); stroke-width: 1.4; }
+#overlays .handle.rot path { stroke-width: 1.2; }
+svg.rotating, svg.rotating #overlays .handle.rot { cursor: grabbing; }
+#overlays .rot-preview polygon { fill: rgba(30, 110, 200, 0.08); stroke: var(--accent); stroke-width: var(--hair); stroke-dasharray: calc(var(--hairn) * 4) calc(var(--hairn) * 3); }
+#overlays .rot-preview .handle { opacity: 1; }
+#overlays .rot-preview text { font: 600 12px system-ui, sans-serif; fill: var(--accent); paint-order: stroke; stroke: #fff; stroke-width: 3px; }
