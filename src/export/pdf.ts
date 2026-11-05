@@ -34,7 +34,7 @@ import { displayColor } from '../aci';
 import { replaceStart, type Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
-import { coverPolygons, layoutText, movedPos, ocrPatch } from '../render/svg';
+import { coverPolygons, layoutText, movedPos, ocrPatch, sized } from '../render/svg';
 import { faceChar, getFace, type FaceId } from '../fonts/faces';
 
 /** Loads a bundled font file (public/fonts) for embedding. */
@@ -204,12 +204,14 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
     if (patch && !safe.lossy) {
       // OCR / boxed text: cover the old value (and the whole drawn box) and write the new part
       for (const mask of coverPolygons(t, patch)) polygon(page, mask.map((p) => apply(toUser, p)));
-      drawStyled(page, t, safe, apply(toUser, movedPos(t, patch.pos)), dirU, size, patch.align, color);
+      const sz = sized(t, movedPos(t, patch.pos));
+      drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirU, sz.t.fontSize / scale, patch.align, color);
     } else if (!safe.lossy) {
       // cover the whole original text and write the new line
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
       polygon(page, textCorners(t, -pad, 1 + pad).map((p) => apply(toUser, p)));
-      drawStyled(page, t, safe, apply(toUser, movedPos(t, lay.pos)), dirU, size, lay.align, color);
+      const sz = sized(t, movedPos(t, lay.pos));
+      drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirU, sz.t.fontSize / scale, lay.align, color);
     } else {
       const font = fonts.helvetica;
       // The line holds characters Helvetica lacks (CJK ...): replace only the values.
@@ -223,7 +225,7 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
         // textCorners()[0] is at the descender line; move up to the baseline
         const base = { x: startD.x - Math.sin(t.rotation) * 0.22 * t.fontSize, y: startD.y + Math.cos(t.rotation) * 0.22 * t.fontSize };
         const p = apply(toUser, base);
-        page.drawText(winAnsiSafe(font, dim.converted!.text).text, { x: p.x, y: p.y, size, font, color, rotate: degrees(angle) });
+        page.drawText(winAnsiSafe(font, dim.converted!.text).text, { x: p.x, y: p.y, size: size * (t.sizeScale ?? 1), font, color, rotate: degrees(angle) });
       }
     }
   }
@@ -352,10 +354,11 @@ function plotEntity(ctx: PlotCtx, e: Entity, m: Mat, depth: number): void {
       const safe = ctx.fonts.forText(e, lay.text);
       if (safe.lossy) ctx.lossyText = true;
       const dir = applyVec(m, { x: Math.cos(e.rotation), y: Math.sin(e.rotation) });
-      const size = e.fontSize * matScale(m);
+      // converted text: moved and sized as the user chose
+      const sz = dims ? sized(e, movedPos(e, lay.pos)) : { t: e, pos: lay.pos };
+      const size = sz.t.fontSize * matScale(m);
       if (size < 0.5) break;
-      const p = apply(m, dims ? movedPos(e, lay.pos) : lay.pos); // moved converted text
-      drawStyled(ctx.page, e, safe, p, dir, size, lay.align, hexRgb(displayColor(e.style.color)));
+      drawStyled(ctx.page, sz.t, safe, apply(m, sz.pos), dir, size, lay.align, hexRgb(displayColor(e.style.color)));
       break;
     }
     case 'image':

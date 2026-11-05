@@ -4,10 +4,11 @@ import { PDFDocument } from 'pdf-lib';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { convertDimension, detectDimensions, findLengthTokens, replacementText, type Dimension } from '../src/dimensions';
 import { writeDxfR12 } from '../src/export/dxfR12';
-import { exportPdfPages } from '../src/export/pdf';
+import { exportPdfOverlay, exportPdfPages } from '../src/export/pdf';
+import { capRatio, getFace } from '../src/fonts/faces';
 import { importPdf, type PdfJs } from '../src/importers/pdf';
 import type { Drawing, TextEntity } from '../src/model';
-import { renderDimensionLayer } from '../src/render/svg';
+import { renderDimensionLayer, sized } from '../src/render/svg';
 import { DEFAULT_SETTINGS } from '../src/units';
 import { loadPdf, readSample } from './helpers';
 
@@ -90,5 +91,32 @@ describe('several pages', () => {
     expect(await pdfText(res.bytes, 1)).toContain('5.00 in');
     expect(await pdfText(res.bytes, 2)).toContain('37.00in');
     expect(await pdfText(res.bytes, 1)).not.toContain('37.00in');
+  });
+});
+
+describe('size of the converted text', () => {
+  it('writes the converted text larger or smaller, centred on the original line', async () => {
+    const d = await loadPdf('defrost-heater.pdf');
+    const dims = convertWhere(d, (s) => s === '127');
+    const t = d.entities.find((e): e is TextEntity => e.kind === 'text' && e.text === '127')!;
+    const size = (svg: string) => Number(/font-size="([\d.]+)"[^>]*>5\.00 in</.exec(svg)![1]);
+    const base = size(renderDimensionLayer(d, dims, true).texts);
+    t.sizeScale = 1.5;
+    const big = renderDimensionLayer(d, dims, true).texts;
+    expect(size(big)).toBeCloseTo(base * 1.5, 3);
+    // the middle of the letters stays put: the baseline moves down by half the extra cap height
+    const sz = sized(t, t.pos);
+    expect(sz.pos.y).toBeCloseTo(t.pos.y - 0.5 * 0.36 * t.fontSize, 6);
+    expect(sized({ ...t, sizeScale: undefined }, t.pos).pos).toEqual(t.pos);
+    // the PDF and the DXF R12 get the same size
+    const pdf = await exportPdfOverlay(d, dims);
+    const doc = await pdfjs.getDocument({ data: pdf.bytes.slice() }).promise;
+    const item = ((await (await doc.getPage(1)).getTextContent()).items as any[]).find((i) => i.str === '5.00 in');
+    expect(Math.hypot(item.transform[2], item.transform[3])).toBeCloseTo((t.fontSize * 1.5) / (25.4 / 72), 1);
+    const parsed: any = new DxfParser().parseSync(writeDxfR12(d, dims));
+    const txt = parsed.entities.find((e: any) => e.type === 'TEXT' && e.text === '5.00 in');
+    expect(txt.textHeight).toBeCloseTo(t.fontSize * 1.5 * capRatio(getFace(t.face)), 2);
+    // texts that are not converted keep their size
+    expect(renderDimensionLayer(d, [], true).texts).not.toContain('5.00 in');
   });
 });

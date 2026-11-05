@@ -48,19 +48,6 @@ export function boxPoly(b: Box): Pt[] {
   ];
 }
 
-/** Centre of a polygon (average of its corners). */
-export function polyCentre(poly: Pt[]): Pt {
-  return { x: poly.reduce((s, p) => s + p.x, 0) / poly.length, y: poly.reduce((s, p) => s + p.y, 0) / poly.length };
-}
-
-/** `poly` turned by `angle` radians (counter-clockwise) around its centre. */
-export function rotatePoly(poly: Pt[], angle: number): Pt[] {
-  const c = polyCentre(poly);
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  return poly.map((p) => ({ x: c.x + (p.x - c.x) * cos - (p.y - c.y) * sin, y: c.y + (p.x - c.x) * sin + (p.y - c.y) * cos }));
-}
-
 /** Angle of a box: direction of its bottom edge (corner 0 to corner 1). */
 export function polyAngle(poly: Pt[]): number {
   return Math.atan2(poly[1].y - poly[0].y, poly[1].x - poly[0].x);

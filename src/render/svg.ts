@@ -235,6 +235,21 @@ export function movedPos(t: TextEntity, p: Pt): Pt {
   return t.offset ? { x: p.x + t.offset.x, y: p.y + t.offset.y } : p;
 }
 
+/**
+ * How a converted text is written when the user changed its size: the text
+ * scaled by `sizeScale`, moved so it stays centred on the original line.
+ */
+export function sized(t: TextEntity, pos: Pt): { t: TextEntity; pos: Pt } {
+  const k = t.sizeScale ?? 1;
+  if (k === 1) return { t, pos };
+  // half the cap height: the middle of the letters stays where it was
+  const shift = -(k - 1) * 0.36 * t.fontSize;
+  return {
+    t: { ...t, fontSize: t.fontSize * k, width: t.width * k },
+    pos: { x: pos.x - Math.sin(t.rotation) * shift, y: pos.y + Math.cos(t.rotation) * shift },
+  };
+}
+
 /** Where the move handle of a converted text sits: just before the start of the new text. */
 export function handlePoint(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): Pt {
   const w = textAdvance(t, drawn.text);
@@ -275,28 +290,6 @@ function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEnt
   );
 }
 
-/** Where the rotate handle of a drawn box sits: the middle of its top edge, and the box's angle. */
-export function rotateHandlePoint(cover: Pt[]): { p: Pt; angle: number } {
-  return { p: { x: (cover[2].x + cover[3].x) / 2, y: (cover[2].y + cover[3].y) / 2 }, angle: Math.atan2(cover[1].y - cover[0].y, cover[1].x - cover[0].x) };
-}
-
-/**
- * The rotate handle of a box the user drew: a short stem up from the middle of
- * its top edge with a round grip, in screen pixels. Shown near the box, like
- * the move handles.
- */
-export function rotateHandleSvg(id: string, cover: Pt[], extra = ''): string {
-  const { p, angle } = rotateHandlePoint(cover);
-  const xs = cover.map((q) => q.x);
-  const ys = cover.map((q) => q.y);
-  const near = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map(f).join(' ');
-  return (
-    `<g class="handle rot${extra}" data-rotate="${id}" data-near="${near}" transform="translate(${f(p.x)} ${f(p.y)}) rotate(${f((angle * 180) / Math.PI)})"><g class="handle-in">` +
-    `<line x1="0" y1="0" x2="0" y2="14"/><circle cy="20" r="6"/><path d="M-3 20a3 3 0 1 1 3 3M0 23l-1.8-1.6M0 23l-1.6 1.8"/>` +
-    `<title>Drag to turn the box</title></g></g>`
-  );
-}
-
 /** Dynamic part: texts that hold dimensions, plus the clickable highlight boxes. */
 export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighlights: boolean): { texts: string; overlays: string } {
   const byText = new Map<string, Dimension[]>();
@@ -324,12 +317,16 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
           texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
         }
         drawn = { text: patch.text, pos: movedPos(e, patch.pos), align: patch.align };
-        texts.push(textSvg(e, drawn.text, drawn.pos, drawn.align, 'converted'));
       }
     } else if (layout.display.changed) {
       drawn = { text: layout.text, pos: movedPos(e, layout.pos), align: layout.align };
-      texts.push(textSvg(e, drawn.text, drawn.pos, drawn.align, 'converted'));
     } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, ''));
+    // the converted text, at the size the user chose
+    const sz = drawn ? sized(e, drawn.pos) : null;
+    if (drawn && sz) {
+      drawn.pos = sz.pos;
+      texts.push(textSvg(sz.t, drawn.text, drawn.pos, drawn.align, 'converted'));
+    }
     for (const dim of list) {
       // a box the user drew stays the box they drew
       const poly = e.cover && list.length === 1 ? e.cover : dimPolygon(e, layout, dim.id);
@@ -337,9 +334,7 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
       const cls = `dim${dim.converted ? ' converted' : ''}${showHighlights ? '' : ' quiet'}`;
       overlays.push(`<polygon class="${cls}" data-dim="${dim.id}" points="${poly.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"><title>${esc(dim.original)}${dim.converted ? ' → ' + esc(dim.converted.text) : ''}</title></polygon>`);
     }
-    if (drawn) handles.push(handleSvg(e, drawn, area));
-    // a box the user drew can be turned to follow an angled dimension
-    if (e.manual && e.cover?.length === 4) handles.push(rotateHandleSvg(e.id, e.cover));
+    if (drawn && sz) handles.push(handleSvg(sz.t, drawn, area));
   }
   // handles on top, so they can be grabbed where they overlap a box
   return { texts: texts.join(''), overlays: overlays.join('') + handles.join('') };

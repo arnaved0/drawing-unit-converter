@@ -142,6 +142,8 @@ export interface TextEntity extends Base {
    * position). The white-out over the original stays where it was.
    */
   offset?: Pt;
+  /** Size of the converted text against the original (1 = same size), set in the dimension list. */
+  sizeScale?: number;
   dxf?: DxfTextSource;
 }
 
