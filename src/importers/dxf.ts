@@ -171,7 +171,10 @@ function convertTextLike(e: any, ctx: Ctx, out: Entity[], dim?: { handle?: strin
       p = { x: p.x - Math.sin(r) * shift, y: p.y + Math.cos(r) * shift };
     }
     const te = makeText(line.text, p, h, rot, align, style, extra(line, raw, false));
-    if (e.xScale && e.xScale > 0) te.width *= e.xScale;
+    if (e.xScale && e.xScale > 0) {
+      te.width *= e.xScale;
+      if (Math.abs(e.xScale - 1) > 0.01) te.hscale = e.xScale; // the preview draws it as wide as CAD does
+    }
     out.push(te);
     return;
   }

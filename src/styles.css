@@ -100,7 +100,6 @@ details summary { cursor: pointer; font-size: 14px; }
 #overlays polygon.dim.flash { animation: flash 1.2s ease-out 2; }
 @keyframes flash { 0%, 100% { fill: var(--accent-soft); } 50% { fill: rgba(255, 170, 0, 0.6); } }
 text.t { pointer-events: none; }
-#dimtexts text.converted { font-weight: 600; }
 #dimtexts polygon.mask { fill: #fff; stroke: none; }
 
 /* boxes: add / remove */
@@ -159,7 +158,9 @@ text.t { pointer-events: none; }
 .dim-edit .e-actions:empty { display: none; }
 
 /* move handles of converted text */
-#overlays .handle { cursor: move; }
+/* shown only while the pointer is on or near the converted value (see updateHandles) */
+#overlays .handle { cursor: move; opacity: 0; pointer-events: none; transition: opacity 0.12s; }
+#overlays .handle.near { opacity: 1; pointer-events: auto; }
 #overlays .handle-in { transform: scale(var(--hairn, 1)); }
 #overlays .handle circle { fill: #fff; stroke: var(--accent); stroke-width: 1.5; }
 #overlays .handle path { fill: none; stroke: var(--accent); stroke-width: 1.4; stroke-linecap: round; }

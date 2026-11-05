@@ -9,9 +9,23 @@ import type { Drawing, Entity, Pt, Style, TextEntity } from '../model';
 import { layoutText, movedPos } from '../render/svg';
 import { TEXT_OUTLINES } from '../model';
 import { encodeR12Text } from '../textcodes';
+import { capRatio, getFace, type FaceId } from '../fonts/faces';
 
 /** Cap height / em size for the Arial-like fonts PDFs mostly use. */
 const CAP_PER_EM = 0.716;
+
+/** Text styles for the bundled faces: the font files CAD programs have that look the same. */
+const DXF_STYLES: Record<FaceId, { name: string; file: string }> = {
+  sans: { name: 'ARIAL', file: 'arial.ttf' },
+  'sans-bold': { name: 'ARIAL_BOLD', file: 'arialbd.ttf' },
+  serif: { name: 'TIMES', file: 'times.ttf' },
+  'serif-bold': { name: 'TIMES_BOLD', file: 'timesbd.ttf' },
+  mono: { name: 'COURIER', file: 'cour.ttf' },
+  'mono-bold': { name: 'COURIER_BOLD', file: 'courbd.ttf' },
+  dejavu: { name: 'VERDANA', file: 'verdana.ttf' },
+  'dejavu-bold': { name: 'VERDANA_BOLD', file: 'verdanab.ttf' },
+  iso: { name: 'ISOCPEUR', file: 'isocpeur.ttf' },
+};
 
 class Writer {
   private out: string[] = [];
@@ -45,6 +59,8 @@ interface Ctx {
   w: Writer;
   ltypes: Map<string, number[]>;
   layers: Set<string>;
+  /** Faces texts were written in (one STYLE each). */
+  faces?: Set<FaceId>;
 }
 
 function ltypeFor(st: Style, ctx: Ctx): string | null {
@@ -94,10 +110,18 @@ function text(ctx: Ctx, t: TextEntity, str: string, pos: Pt, align: TextEntity['
   const st = { ...t.style };
   common(ctx, 'TEXT', st);
   xy(ctx, 10, pos);
-  ctx.w.pair(40, t.fontSize * CAP_PER_EM);
+  // DXF text height is the cap height
+  ctx.w.pair(40, t.fontSize * (t.face ? capRatio(getFace(t.face)) : CAP_PER_EM));
   ctx.w.pair(1, encodeR12Text(str));
   const deg = (normAngle(t.rotation) * 180) / Math.PI;
   if (Math.abs(deg) > 1e-6) ctx.w.pair(50, deg);
+  // the font, width factor and lean the text was matched to
+  if (t.face) {
+    ctx.faces?.add(t.face);
+    ctx.w.pair(7, DXF_STYLES[t.face].name);
+  }
+  if (t.hscale && Math.abs(t.hscale - 1) > 0.005) ctx.w.pair(41, t.hscale);
+  if (t.slant) ctx.w.pair(51, (Math.atan(t.slant) * 180) / Math.PI);
   if (align !== 'left') {
     ctx.w.pair(72, align === 'center' ? 1 : 2);
     xy(ctx, 11, pos);
@@ -182,9 +206,9 @@ export function writeDxfR12(d: Drawing, dims: Dimension[]): string {
     dimsByText.set(dim.textId, l);
   }
   // Entities first (collects layers and linetypes), then assemble the file.
-  const ent: Ctx = { w: new Writer(), ltypes: new Map(), layers: new Set(['0']) };
+  const ent: Ctx = { w: new Writer(), ltypes: new Map(), layers: new Set(['0']), faces: new Set() };
   for (const e of d.entities) entity(ent, e, dimsByText);
-  const blk: Ctx = { w: new Writer(), ltypes: ent.ltypes, layers: ent.layers };
+  const blk: Ctx = { w: new Writer(), ltypes: ent.ltypes, layers: ent.layers, faces: ent.faces };
   for (const b of Object.values(d.blocks)) {
     blk.w.pair(0, 'BLOCK');
     blk.w.pair(8, '0');
@@ -249,17 +273,22 @@ export function writeDxfR12(d: Drawing, dims: Dimension[]): string {
   w.pair(0, 'ENDTAB');
   w.pair(0, 'TABLE');
   w.pair(2, 'STYLE');
-  w.pair(70, 1);
-  w.pair(0, 'STYLE');
-  w.pair(2, 'STANDARD');
-  w.pair(70, 0);
-  w.pair(40, 0);
-  w.pair(41, 1);
-  w.pair(50, 0);
-  w.pair(71, 0);
-  w.pair(42, 2.5);
-  w.pair(3, 'arial.ttf');
-  w.pair(4, '');
+  const faces = new Set<FaceId>([...(ent.faces ?? []), ...(blk.faces ?? [])]);
+  w.pair(70, 1 + faces.size);
+  const style = (name: string, file: string) => {
+    w.pair(0, 'STYLE');
+    w.pair(2, name);
+    w.pair(70, 0);
+    w.pair(40, 0);
+    w.pair(41, 1);
+    w.pair(50, 0);
+    w.pair(71, 0);
+    w.pair(42, 2.5);
+    w.pair(3, file);
+    w.pair(4, '');
+  };
+  style('STANDARD', 'arial.ttf');
+  for (const f of faces) style(DXF_STYLES[f].name, DXF_STYLES[f].file);
   w.pair(0, 'ENDTAB');
   w.pair(0, 'ENDSEC');
 

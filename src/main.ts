@@ -9,15 +9,22 @@ import { writeDxfR12 } from './export/dxfR12';
 import { exportPdfPages, exportPdfPlot } from './export/pdf';
 import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
-import { importPdf, type PdfJs } from './importers/pdf';
+import { importPdf, type PdfJs, type TextStyleHint } from './importers/pdf';
 import type { Box, Drawing, Entity, LengthUnit, Pt, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
-import { normaliseOcrText, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
+import { matchFonts, normaliseOcrText, placeFit, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
+import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, type Face } from './fonts/faces';
+import { canvasRenderer } from './fonts/match';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
 import { DEFAULT_SETTINGS, formatLength, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 const BASE = import.meta.env.BASE_URL;
+setFontBase(BASE);
+registerFaces();
+const createCanvas = (w: number, h: number) => Object.assign(document.createElement('canvas'), { width: w, height: h });
+/** Draws text in the bundled faces, to match OCR text to a font. */
+const fontRenderer = canvasRenderer(createCanvas);
 const PDF_PARAMS = {
   cMapUrl: `${BASE}vendor/pdfjs/cmaps/`,
   cMapPacked: true,
@@ -116,9 +123,11 @@ async function ocrPdf(bytes: Uint8Array, pageIndex: number): Promise<PreprocessR
   try {
     const doc = await task.promise;
     const page = await doc.getPage(Math.min(pageIndex, doc.numPages - 1) + 1);
+    await loadAllFaces();
     return await preprocessPage(bytes, page as never, Math.min(pageIndex, doc.numPages - 1), {
       recognise: recogniseInWorker,
-      createCanvas: (w, h) => Object.assign(document.createElement('canvas'), { width: w, height: h }),
+      createCanvas,
+      render: fontRenderer,
       onProgress: (f, label) => busy(`Scan & OCR: ${label}…`, f < 1 ? 0.02 : 0.97),
     });
   } finally {
@@ -232,11 +241,13 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
     let d: Drawing;
     let ocrNote = '';
     let pdfBytes = bytes;
+    let textStyles: TextStyleHint[] | undefined;
     if (ext === 'pdf' && ocrOn()) {
       // Scan & OCR first: text drawn as outlines or scanned becomes real text
       const res = await ocrPdf(bytes, pageIndex);
       pdfBytes = res.bytes;
       docBytes = res.bytes;
+      textStyles = res.styles;
       ocrNote = res.added
         ? `Scan & OCR added ${res.added} line${res.added === 1 ? '' : 's'} of text read from the page` +
           (res.alreadyText ? ` (${res.alreadyText} more were already text)` : '') +
@@ -247,7 +258,7 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
       if (res.unsupported) ocrNote += ` ${res.unsupported} line${res.unsupported === 1 ? '' : 's'} in a script the PDF font cannot hold (for example Chinese) stayed as drawn.`;
       busy('Reading drawing…');
     }
-    if (ext === 'pdf') d = await importPdf(pdfjs as unknown as PdfJs, pdfBytes, file.name, { pageIndex, encodeImage, docParams: PDF_PARAMS });
+    if (ext === 'pdf') d = await importPdf(pdfjs as unknown as PdfJs, pdfBytes, file.name, { pageIndex, encodeImage, docParams: PDF_PARAMS, textStyles });
     else if (ext === 'dxf') d = importDxf(bytes, file.name);
     else d = await importDwg(bytes, file.name);
     if (ocrNote) d.warnings.unshift(ocrNote);
@@ -315,6 +326,35 @@ function renderLayer(): void {
   const { texts, overlays } = renderDimensionLayer(state.drawing, state.dims, state.highlight);
   dimTextLayer.innerHTML = texts;
   overlayLayer.innerHTML = overlays;
+  updateHandles();
+}
+
+// ------------------------------------------------------------------ move handles on hover
+
+/** Where the pointer last was over the drawing (SVG coordinates), null when it left. */
+let pointer: { x: number; y: number } | null = null;
+/** How close (screen pixels) the pointer must be to a converted value for its handle to show. */
+const NEAR_PX = 28;
+
+/** Shows the move handles of the converted values the pointer is on or near; hides the others. */
+function updateHandles(): void {
+  const s = Math.max(view.w / (svg.clientWidth || 1), view.h / (svg.clientHeight || 1));
+  const pad = NEAR_PX * s;
+  const handles = [...overlayLayer.querySelectorAll<SVGGElement>('.handle')];
+  // distance from the pointer to each value's area (0 inside); SVG y is the negated drawing y
+  const dist = handles.map((h) => {
+    if (!pointer) return Infinity;
+    const [x0, y0, x1, y1] = (h.dataset.near ?? '').split(' ').map(Number);
+    const dx = Math.max(x0 - pointer.x, 0, pointer.x - x1);
+    const dy = Math.max(y0 + pointer.y, 0, -pointer.y - y1);
+    return Math.hypot(dx, dy);
+  });
+  // only the nearest value's handle (or every value the pointer is inside)
+  const best = Math.min(...dist);
+  handles.forEach((h, k) => {
+    const show = moving ? moving.text.id === h.dataset.handle : dist[k] <= pad && (dist[k] === 0 || dist[k] === best);
+    h.classList.toggle('near', show);
+  });
 }
 
 function renderDynamic(): void {
@@ -506,6 +546,8 @@ svg.addEventListener('wheel', (ev) => {
   ev.preventDefault();
   const p = clientToSvg(ev.clientX, ev.clientY);
   zoomAt(Math.exp(ev.deltaY * (ev.deltaMode === 1 ? 0.05 : 0.0015)), p.x, p.y);
+  pointer = clientToSvg(ev.clientX, ev.clientY);
+  updateHandles();
 }, { passive: false });
 
 let drag: { x: number; y: number; vx: number; vy: number; moved: boolean; id: number } | null = null;
@@ -517,8 +559,15 @@ svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
 /** A converted text being moved with its handle. */
 let moving: { text: TextEntity; x: number; y: number; from: Pt; id: number; moved: boolean } | null = null;
 
+svg.addEventListener('pointerleave', () => {
+  pointer = null;
+  if (!moving) updateHandles();
+});
 svg.addEventListener('pointerdown', (ev) => {
-  const handle = (ev.target as Element).closest?.('[data-handle]') as SVGElement | null;
+  // a tap (touch screens have no hover) shows the handles near it
+  pointer = clientToSvg(ev.clientX, ev.clientY);
+  updateHandles();
+  const handle = (ev.target as Element).closest?.('.handle.near[data-handle]') as SVGElement | null;
   if (handle && ev.button === 0) {
     const t = textOf(handle.dataset.handle!);
     if (t) {
@@ -543,6 +592,8 @@ svg.addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) svg.setPointerCapture(ev.pointerId);
 });
 svg.addEventListener('pointermove', (ev) => {
+  pointer = clientToSvg(ev.clientX, ev.clientY);
+  if (!moving && !pick && !drag?.moved) updateHandles();
   if (moving && moving.id === ev.pointerId) {
     const p = clientToSvg(ev.clientX, ev.clientY);
     if (!moving.moved) {
@@ -584,6 +635,7 @@ svg.addEventListener('pointerup', (ev) => {
     const m = moving;
     moving = null;
     svg.classList.remove('moving');
+    updateHandles();
     if (m.moved) {
       renderList();
       toast('Moved the converted text. The original stays covered.', false, 4000, { label: 'Undo', run: undo });
@@ -610,6 +662,8 @@ svg.addEventListener('pointerup', (ev) => {
 });
 svg.addEventListener('pointercancel', () => {
   moving = null;
+  pointer = null;
+  updateHandles();
   svg.classList.remove('moving');
   drag = null;
   pick = null;
@@ -772,8 +826,31 @@ function removeDimension(id: string): void {
   toast(`Removed "${dim.original}".`, false, 6000, { label: 'Undo', run: undo });
 }
 
+type BoxStyle = Pick<TextEntity, 'face' | 'hscale' | 'slant'>;
+
+/** The face family most OCR text on the page was matched to. */
+function pageFamily(d: Drawing): Face['family'] | undefined {
+  const st = pageStyle(d);
+  return st?.face ? getFace(st.face).family : undefined;
+}
+
+/** The look most OCR text on the page has (weighted by length): for boxes whose letters could not be measured. */
+function pageStyle(d: Drawing): BoxStyle | undefined {
+  const count = new Map<string, { n: number; st: BoxStyle }>();
+  for (const e of d.entities) {
+    if (e.kind !== 'text' || !e.ocr || !e.face) continue;
+    const key = e.face;
+    const c = count.get(key) ?? { n: 0, st: { face: e.face, hscale: e.hscale, slant: e.slant } };
+    c.n += e.text.length;
+    count.set(key, c);
+  }
+  let best: { n: number; st: BoxStyle } | undefined;
+  for (const c of count.values()) if (!best || c.n > best.n) best = c;
+  return best?.st;
+}
+
 /** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
-async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placement: Placement; color: string } | null> {
+async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placement: Placement; color: string; style?: BoxStyle } | null> {
   if (!d.pdf) return null;
   const toUser = invert(d.pdf.userToDrawing);
   const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
@@ -805,7 +882,7 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
     ctx.fillRect(0, 0, w, h);
     await page.render({ canvasContext: ctx, viewport: vp, canvas, transform: [1, 0, 0, 1, -x0, -y0] } as never).promise;
     const img = ctx.getImageData(0, 0, w, h);
-    const lines = await recogniseInWorker({ width: w, height: h, data: img.data }, pxPerMm, pad);
+    const lines = await recogniseInWorker({ width: w, height: h, data: img.data.slice() }, pxPerMm, pad);
     if (!lines.length) return null;
     // prefer a line that holds a length, then the most confident one
     const scored = lines
@@ -817,12 +894,16 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
       const p = apply(d.pdf!.userToDrawing, { x: ux, y: uy });
       return [p.x, p.y];
     };
-    const pl = placeLine(best.l, map);
+    // the font, size and width of the letters in the box, preferring the page's font
+    await loadAllFaces();
+    const fit = matchFonts(img, [{ l: best.l, text: best.text }], fontRenderer, pageFamily(d))[0];
+    const pl = fit ? placeFit(fit, map) : placeLine(best.l, map);
     const hex = '#' + best.l.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
     return {
       text: best.text,
       placement: { origin: { x: pl.origin[0], y: pl.origin[1] }, across: { x: pl.across[0], y: pl.across[1] }, up: { x: pl.up[0], y: pl.up[1] } },
       color: hex,
+      style: fit ? { face: fit.face, hscale: fit.hscale, slant: fit.slant } : pageStyle(d),
     };
   } finally {
     await task.destroy();
@@ -873,6 +954,9 @@ async function addBox(box: Box): Promise<void> {
   const text = await askBoxText(read?.text ?? null);
   if (text === null) return;
   const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, box);
+  // written like the letters in the box (or, when none were read, like the page's other text)
+  Object.assign(t, read?.style ?? pageStyle(d) ?? {});
+  if (t.face) t.width = advance(getFace(t.face), text) * t.fontSize * (t.hscale ?? 1);
   const edit = addBoxedText(d, state.dims, box, t);
   const added = edit.dims.filter((x) => x.textId === t.id);
   if (!added.length) {
@@ -1014,8 +1098,8 @@ $('export-pdf').addEventListener('click', async () => {
       // every page worked on goes into the one download
       const pages = [...pageCache.values()].filter((p) => p.drawing.pdf!.pageIndex !== d.pdf!.pageIndex).map((p) => ({ d: p.drawing, dims: p.dims }));
       pages.push({ d, dims: state.dims });
-      res = await exportPdfPages(docBytes ?? d.pdf.bytes, pages);
-    } else res = await exportPdfPlot(d, state.dims);
+      res = await exportPdfPages(docBytes ?? d.pdf.bytes, pages, fontBytes);
+    } else res = await exportPdfPlot(d, state.dims, fontBytes);
     download(res.bytes, `${baseName()}-converted.pdf`, 'application/pdf');
     if (res.warnings.length) toast(res.warnings.join(' '), false, 7000);
   } catch (err) {

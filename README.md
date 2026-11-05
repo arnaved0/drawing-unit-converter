@@ -23,7 +23,8 @@ click a dimension to convert it to another unit, then download the result as
    * **DXF R12** (DXF/DWG input): a simplified copy that opens in any CAD program.
    * **PDF**: for PDF input, the original page with the converted values written
      over the old ones. For DXF/DWG input, a vector plot on an A3 sheet.
-   * **DWG**: not available yet (see *Limitations*).
+
+   There is no DWG download: save the DXF as DWG in your CAD program.
 
 ## What it recognises
 
@@ -98,9 +99,41 @@ Changing any of these converts the dimension. Edited rows are marked with *.
 
 ### Moving converted text
 
-Each converted value has a round handle just before it. Drag the handle to
-move the new text. The white patch stays over the original value, so the old
-text stays hidden. Moves can be undone like any other change.
+A round handle appears just before a converted value when the pointer is on
+or near it (on a touch screen, tap near the value). Drag the handle to move
+the new text. The white patch stays over the original value, so the old text
+stays hidden. Moves can be undone like any other change.
+
+### Font and size of converted values
+
+A converted value is written in the same size and style as the text it
+replaces. The app carries open fonts that look like the usual drawing fonts:
+
+| Looks like | Font used |
+| --- | --- |
+| Arial, Helvetica | Arimo (regular, bold) |
+| Times New Roman | Tinos (regular, bold) |
+| Courier New | Cousine (regular, bold) |
+| Verdana, DejaVu, Bitstream Vera | DejaVu Sans (regular, bold) |
+| ISOCPEUR, romans, simplex and other CAD lettering | osifont (ISO 3098) |
+
+* **Real PDF text:** the font is chosen from the font name in the PDF, and
+  stretched to the original's exact width.
+* **Text read by Scan & OCR** (letter shapes or scans): the letters of each
+  line are compared with every font, drawn over them. The best match gives
+  the font, bold or regular, sloped or upright, the size and the width factor
+  (for example 80% wide CAD lettering). A page gets one font family, so short
+  values like "8" follow the rest of the drawing. On the test drawings most
+  sizes come out within 2% of the original; a short value squeezed between
+  arrowheads can be off by up to about 15%.
+* **Boxes** use the font of the letters in the box, or the page's font when
+  nothing could be read.
+
+The preview and the PDF download use these fonts, which are embedded in the
+PDF. The DXF R12 download sets a matching text style (`arial.ttf`,
+`isocpeur.ttf` ...), the cap height, width factor and oblique angle. For
+DXF/DWG input, a converted value keeps its own TEXT/MTEXT entity, so CAD
+shows it in the drawing's own text style.
 
 ### Multi-page PDFs
 
@@ -124,16 +157,19 @@ like "Length in mm" or the DXF `$INSUNITS` setting, and can be changed in the pa
 
 ## Limitations
 
-* **DWG export** is not built yet. No open-source library can write DWG reliably
-  in a browser. The plan is a small conversion server. Until then, download the
-  DXF and save it as DWG in your CAD program.
+* **No DWG download.** No open-source library can write DWG reliably in a
+  browser. Download the DXF and save it as DWG in your CAD program.
 * **Scanned PDFs:** text in a scan is read by the Scan & OCR step, but the scan's
   lines stay an image. They are not traced into DXF geometry.
 * PDF geometry is exported at paper scale (1 mm on the sheet = 1 drawing unit),
   not at the real size of the part.
 * In PDF output, the old value is covered with a white box and the new value is
-  drawn on top in Helvetica. The old text is still in the file underneath, so
-  copy/search can find it.
+  drawn on top in the matching font. The old text is still in the file
+  underneath, so copy/search can find it.
+* The fonts are lookalikes, not the drawing's own font files. A font that looks
+  like none of them (a script or decorative font) gets the closest one.
+* The DXF/DWG preview draws text in Arial (dxf-parser does not read text styles);
+  the DXF download is not affected.
 * For PDF input, the DXF download contains only the page on screen.
 * If converted text has been moved in a DXF/DWG drawing, **DXF** downloads the
   simplified R12 copy, since the original file has no place for the white patch.
@@ -157,7 +193,12 @@ designed for: CAD-exported heater drawings with coloured, rotated and per-charac
 text, CJK labels, dash-dot centre lines and repeated bolt heads.
 `scripts/make_outlined.py` (needs `pymupdf fonttools`) makes copies in
 `samples/outlined/` with every letter drawn as a filled outline and no real
-text, like PDFs exported with "text as geometry".
+text, like PDFs exported with "text as geometry". `samples/outlined/fonts/`
+holds the same drawing lettered in other fonts (DejaVu, Tinos, Tinos Bold,
+osifont, osifont at 80% width), for testing the font matching.
+`scripts/make_fonts.py` (needs `fonttools`) downloads the fonts, cuts them
+down to Latin-1 and drawing symbols, and writes `public/fonts/` and
+`src/fonts/metrics.ts`.
 
 ### Layout
 
@@ -177,6 +218,9 @@ src/
   ocr/textLayer.ts      Invisible text layer (PdfCraft's method) written with pdf-lib
   ocr/engine.ts         PP-OCRv5 text detection + recognition (rotated text, stacked lines)
   ocr/worker.ts         Web Worker that runs text recognition off the main thread
+  fonts/faces.ts        The bundled fonts: names, widths, font-name lookup, loading
+  fonts/match.ts        Matching OCR letters to a font, size and width factor
+  fonts/metrics.ts      Font widths (generated by scripts/make_fonts.py)
   render/svg.ts         Model -> SVG preview
   export/dxfPatch.ts    In-place edit of the original DXF
   export/dxfR12.ts      Model -> DXF R12
@@ -190,4 +234,8 @@ Pushing to `main` runs the tests and deploys to GitHub Pages
 
 GPL-3.0-or-later, because the DWG reader (LibreDWG) is GPL-3.0. See [LICENSE](LICENSE).
 The OCR models in `public/models/ppocrv5/` are Apache-2.0 (see the README there).
-The text-layer method follows PdfCraft (Apache-2.0).
+The text-layer method follows PdfCraft (Apache-2.0). The fonts in
+`public/fonts/` keep their own licences: Arimo, Tinos and Cousine are SIL OFL
+1.1, DejaVu Sans has the Bitstream Vera licence, osifont is LGPL-3 with font
+exception (see `public/fonts/README.md`). They are renamed "DUC ..." because
+they are cut-down copies.
