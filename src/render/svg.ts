@@ -212,6 +212,33 @@ export function dimPolygon(t: TextEntity, layout: TextLayout, dimId: string): Pt
   return textCorners(tmp, Math.max(0, from - pad), Math.min(1, to + pad), layout.width);
 }
 
+/** A converted text's position after the user moved it with its handle. */
+export function movedPos(t: TextEntity, p: Pt): Pt {
+  return t.offset ? { x: p.x + t.offset.x, y: p.y + t.offset.y } : p;
+}
+
+/** Where the move handle of a converted text sits: just before the start of the new text. */
+export function handlePoint(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): Pt {
+  const perChar = t.width / Math.max(1, [...t.text].length);
+  const w = perChar * [...drawn.text].length;
+  const back = drawn.align === 'center' ? w / 2 : drawn.align === 'right' ? w : 0;
+  const dx = Math.cos(t.rotation);
+  const dy = Math.sin(t.rotation);
+  const u = -back - 0.75 * t.fontSize;
+  const v = 0.35 * t.fontSize;
+  return { x: drawn.pos.x + dx * u - dy * v, y: drawn.pos.y + dy * u + dx * v };
+}
+
+function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): string {
+  const p = handlePoint(t, drawn);
+  // drawn in screen pixels (scaled by --hairn) so it stays the same size at any zoom
+  return (
+    `<g class="handle" data-handle="${t.id}" transform="translate(${f(p.x)} ${f(p.y)})"><g class="handle-in">` +
+    `<circle r="8"/><path d="M0 -5.5V5.5M-5.5 0H5.5M0 -5.5l-2 2M0 -5.5l2 2M0 5.5l-2-2M0 5.5l2-2M-5.5 0l2-2M-5.5 0l2 2M5.5 0l-2-2M5.5 0l-2 2"/>` +
+    `<title>Drag to move the converted text</title></g></g>`
+  );
+}
+
 /** Dynamic part: texts that hold dimensions, plus the clickable highlight boxes. */
 export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighlights: boolean): { texts: string; overlays: string } {
   const byText = new Map<string, Dimension[]>();
@@ -222,18 +249,26 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
   }
   const texts: string[] = [];
   const overlays: string[] = [];
+  const handles: string[] = [];
   for (const e of d.entities) {
     if (e.kind !== 'text') continue;
     const list = byText.get(e.id);
     if (!list) continue;
     const layout = layoutText(e, list);
+    let drawn: { text: string; pos: Pt; align: TextEntity['align'] } | null = null;
     if (e.ocr) {
       const patch = ocrPatch(e, list);
       if (patch) {
+        // the white-out stays over the original; only the new text moves
         for (const mask of coverPolygons(e, patch)) texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
-        texts.push(textSvg(e, patch.text, patch.pos, patch.align, 'converted'));
+        drawn = { text: patch.text, pos: movedPos(e, patch.pos), align: patch.align };
+        texts.push(textSvg(e, drawn.text, drawn.pos, drawn.align, 'converted'));
       }
-    } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, layout.display.changed ? 'converted' : ''));
+    } else if (layout.display.changed) {
+      drawn = { text: layout.text, pos: movedPos(e, layout.pos), align: layout.align };
+      texts.push(textSvg(e, drawn.text, drawn.pos, drawn.align, 'converted'));
+    } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, ''));
+    if (drawn) handles.push(handleSvg(e, drawn));
     for (const dim of list) {
       // a box the user drew stays the box they drew
       const poly = e.cover && list.length === 1 ? e.cover : dimPolygon(e, layout, dim.id);
@@ -241,5 +276,6 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
       overlays.push(`<polygon class="${cls}" data-dim="${dim.id}" points="${poly.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"><title>${esc(dim.original)}${dim.converted ? ' → ' + esc(dim.converted.text) : ''}</title></polygon>`);
     }
   }
-  return { texts: texts.join(''), overlays: overlays.join('') };
+  // handles on top, so they can be grabbed where they overlap a box
+  return { texts: texts.join(''), overlays: overlays.join('') + handles.join('') };
 }

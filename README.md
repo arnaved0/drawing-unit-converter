@@ -83,6 +83,31 @@ Every add and remove can be undone with the **Undo** button in the message
 that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans
 the drawing in every mode.
 
+### Editing one dimension
+
+Each row in the **Dimensions** list has a **⌄** button that opens a small
+panel for that dimension:
+
+* **Converted text**: type exactly what the new value should read
+  (for example `6 IN. TYP`). Applied when you press Enter or leave the field.
+* **Decimals** and **Suffix**: override the Settings for this dimension only
+  (for example 0 decimals and `"` gives `6"`; **None** drops the unit label).
+* **Reset** clears these overrides. **Move text back** undoes a move (see below).
+
+Changing any of these converts the dimension. Edited rows are marked with *.
+
+### Moving converted text
+
+Each converted value has a round handle just before it. Drag the handle to
+move the new text. The white patch stays over the original value, so the old
+text stays hidden. Moves can be undone like any other change.
+
+### Multi-page PDFs
+
+Each page keeps its own boxes, conversions, edits and zoom when you switch
+pages, and is only scanned the first time you open it. The PDF download
+includes the changes from every page you worked on.
+
 ### Which values count as dimensions
 
 * A number with a length unit anywhere in a text: `305mm Silicone wire leads`,
@@ -109,6 +134,10 @@ like "Length in mm" or the DXF `$INSUNITS` setting, and can be changed in the pa
 * In PDF output, the old value is covered with a white box and the new value is
   drawn on top in Helvetica. The old text is still in the file underneath, so
   copy/search can find it.
+* For PDF input, the DXF download contains only the page on screen.
+* If converted text has been moved in a DXF/DWG drawing, **DXF** downloads the
+  simplified R12 copy, since the original file has no place for the white patch.
+* Your work is kept while the page is open, not after a reload.
 * DXF entities that dxf-parser does not support (HATCH, MLEADER, tables …) are
   not shown in the preview, but the DXF download keeps them, because it patches
   the original file.

@@ -125,6 +125,11 @@ export interface TextEntity extends Base {
   manual?: boolean;
   /** The region the user drew (drawing coordinates): covered whole when the value is converted. */
   cover?: Pt[];
+  /**
+   * Where the user moved the converted text to (drawing units, added to its
+   * position). The white-out over the original stays where it was.
+   */
+  offset?: Pt;
   dxf?: DxfTextSource;
 }
 

@@ -1,16 +1,16 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { convertDimension, detectDimensions, findLengthTokens, type Dimension } from './dimensions';
+import { convertDimension, detectDimensions, findLengthTokens, replacementText, type Dimension } from './dimensions';
 import { addBoxedText, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
-import { exportPdfOverlay, exportPdfPlot } from './export/pdf';
+import { exportPdfPages, exportPdfPlot } from './export/pdf';
 import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs } from './importers/pdf';
-import type { Box, Drawing, Entity, LengthUnit, TextEntity } from './model';
+import type { Box, Drawing, Entity, LengthUnit, Pt, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
 import { normaliseOcrText, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
@@ -180,15 +180,55 @@ async function encodeImage(img: any): Promise<string> {
 
 // ------------------------------------------------------------------ loading
 
-async function openFile(file: File, pageIndex = 0): Promise<void> {
+// ------------------------------------------------------------------ pages
+
+/** Everything the user did on one page, kept while they look at other pages. */
+interface PageState {
+  drawing: Drawing;
+  dims: Dimension[];
+  used: Map<string, ConversionSettings>;
+  sourceUnit: LengthUnit;
+  undo: Snapshot[];
+  view: { x: number; y: number; w: number; h: number };
+}
+const pageCache = new Map<number, PageState>();
+/**
+ * The PDF with the OCR text layers of every page read so far: each page is
+ * read once and the layers build up, so the download keeps all of them.
+ */
+let docBytes: Uint8Array<ArrayBuffer> | null = null;
+
+function savePage(): void {
+  const d = state.drawing;
+  if (!d?.pdf) return;
+  pageCache.set(d.pdf.pageIndex, { drawing: d, dims: state.dims, used: state.used, sourceUnit: state.sourceUnit, undo: [...undoStack], view: { ...view } });
+}
+
+async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void> {
   const ext = file.name.split('.').pop()?.toLowerCase();
   if (!['pdf', 'dxf', 'dwg'].includes(ext ?? '')) {
     toast('Please choose a .pdf, .dxf or .dwg file.', true);
     return;
   }
+  const samePdf = ext === 'pdf' && file === state.file && !fresh;
+  if (samePdf) savePage();
+  else {
+    pageCache.clear();
+    docBytes = null;
+  }
+  const cached = samePdf ? pageCache.get(pageIndex) : undefined;
+  if (cached) {
+    // back to a page already worked on: no new scan, everything as it was left
+    state.drawing = cached.drawing;
+    state.dims = cached.dims;
+    state.used = cached.used;
+    state.sourceUnit = cached.sourceUnit;
+    afterLoad({ undo: cached.undo, view: cached.view });
+    return;
+  }
   busy(ext === 'dwg' ? 'Reading DWG (the DWG reader is about 11 MB and loads once)…' : 'Reading drawing…');
   try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
+    const bytes = docBytes ?? new Uint8Array(await file.arrayBuffer());
     let d: Drawing;
     let ocrNote = '';
     let pdfBytes = bytes;
@@ -196,6 +236,7 @@ async function openFile(file: File, pageIndex = 0): Promise<void> {
       // Scan & OCR first: text drawn as outlines or scanned becomes real text
       const res = await ocrPdf(bytes, pageIndex);
       pdfBytes = res.bytes;
+      docBytes = res.bytes;
       ocrNote = res.added
         ? `Scan & OCR added ${res.added} line${res.added === 1 ? '' : 's'} of text read from the page` +
           (res.alreadyText ? ` (${res.alreadyText} more were already text)` : '') +
@@ -210,10 +251,11 @@ async function openFile(file: File, pageIndex = 0): Promise<void> {
     else if (ext === 'dxf') d = importDxf(bytes, file.name);
     else d = await importDwg(bytes, file.name);
     if (ocrNote) d.warnings.unshift(ocrNote);
+    if (ext === 'pdf') docBytes = pdfBytes;
     state.drawing = d;
     state.file = file;
     state.dims = detectDimensions(d);
-    state.used.clear();
+    state.used = new Map();
     state.sourceUnit = d.detectedDimensionUnit;
     afterLoad();
   } catch (err) {
@@ -224,7 +266,7 @@ async function openFile(file: File, pageIndex = 0): Promise<void> {
   }
 }
 
-function afterLoad(): void {
+function afterLoad(restore?: { undo: Snapshot[]; view: { x: number; y: number; w: number; h: number } }): void {
   const d = state.drawing!;
   $('empty').hidden = true;
   svg.removeAttribute('hidden');
@@ -244,12 +286,16 @@ function afterLoad(): void {
   $('export-dxf12').hidden = d.source === 'pdf';
   $('export-dxf').title = d.source === 'pdf' ? 'DXF (R12) with the recognised lines, arcs, circles, text and blocks' : 'DXF: the original file with only the converted texts changed';
   undoStack.length = 0;
+  if (restore) undoStack.push(...restore.undo);
   setMode('convert');
   renderStatic();
   renderDynamic();
   renderReport();
-  fit();
-  if (!state.dims.length) toast('No dimensions were found in this drawing.', false, 6000);
+  if (restore) {
+    Object.assign(view, restore.view);
+    applyView();
+  } else fit();
+  if (!state.dims.length && !restore) toast('No dimensions were found in this drawing.', false, 6000);
 }
 
 // ------------------------------------------------------------------ rendering
@@ -263,11 +309,17 @@ function renderStatic(): void {
   geomLayer.innerHTML = renderGeometry(state.drawing, textIdsWithDims());
 }
 
-function renderDynamic(): void {
+/** Converted texts, white-outs, highlight boxes and move handles. */
+function renderLayer(): void {
   if (!state.drawing) return;
   const { texts, overlays } = renderDimensionLayer(state.drawing, state.dims, state.highlight);
   dimTextLayer.innerHTML = texts;
   overlayLayer.innerHTML = overlays;
+}
+
+function renderDynamic(): void {
+  if (!state.drawing) return;
+  renderLayer();
   renderList();
 }
 
@@ -292,17 +344,93 @@ function renderList(): void {
     li.className = d.converted ? 'converted' : '';
     const t = textOf(d.textId);
     const ctx = t && t.text.trim() !== d.original.trim() ? t.text : '';
+    const open = expanded.has(d.id);
     li.innerHTML =
-      `<span class="orig"></span>${d.converted ? '<span class="arrow">→</span><span class="conv"></span>' : ''}<span class="ctx"></span>` +
-      `<button class="remove" title="Remove this box" aria-label="Remove this box">×</button>`;
+      `<div class="dim-row"><span class="orig"></span>${d.converted ? '<span class="arrow">→</span><span class="conv"></span>' : ''}<span class="ctx"></span>` +
+      `<button class="expand" title="Edit this dimension" aria-label="Edit this dimension" aria-expanded="${open}"></button>` +
+      `<button class="remove" title="Remove this box" aria-label="Remove this box">×</button></div>` +
+      (open ? editPanel(d, t) : '');
     if (t?.manual) li.classList.add('manual');
+    if (d.override || t?.offset) li.classList.add('edited');
+    if (open) li.classList.add('open');
     li.querySelector('.orig')!.textContent = d.original;
     if (d.converted) li.querySelector('.conv')!.textContent = d.converted.text;
     li.querySelector('.ctx')!.textContent = ctx;
     li.title = t?.text ?? '';
+    if (open) (li.querySelector('.e-text') as HTMLInputElement).value = d.converted?.text ?? previewText(d);
     list.appendChild(li);
   }
 }
+
+// ------------------------------------------------------------------ editing one dimension
+
+/** Dimensions whose edit panel is open in the list. */
+const expanded = new Set<string>();
+const SUFFIXES: [string, string][] = [['', 'None'], ['in', 'in'], ['"', '"'], ['mm', 'mm'], ['cm', 'cm'], ['m', 'm'], ['ft', 'ft'], ["'", "'"]];
+const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+
+/** What a dimension would read once converted with the current settings and its own. */
+function previewText(d: Dimension): string {
+  const t = textOf(d.textId);
+  return t ? replacementText(d, t.text, state.used.get(d.id) ?? state.settings, state.sourceUnit) : d.original;
+}
+
+function editPanel(d: Dimension, t: TextEntity | undefined): string {
+  const o = d.override ?? {};
+  const dec = ['<option value="">Default</option>', ...[0, 1, 2, 3, 4].map((n) => `<option value="${n}"${o.decimals === n ? ' selected' : ''}>${n}</option>`)].join('');
+  const suf = ['<option value="">Default</option>', ...SUFFIXES.map(([v, l]) => `<option value="${escHtml('=' + v)}"${o.suffix === v ? ' selected' : ''}>${escHtml(l)}</option>`)].join('');
+  return (
+    `<div class="dim-edit">` +
+    `<label class="e-field e-wide"><span>Converted text</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
+    `<label class="e-field"><span>Decimals</span><select class="e-dec">${dec}</select></label>` +
+    `<label class="e-field"><span>Suffix</span><select class="e-suf">${suf}</select></label>` +
+    `<div class="e-actions">${t?.offset ? '<button class="btn small e-moveback">Move text back</button>' : ''}` +
+    `${d.override ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
+    `</div>`
+  );
+}
+
+/** Applies an edit to one dimension and converts it with it. */
+function editDimension(id: string, change: (o: NonNullable<Dimension['override']>) => void): void {
+  const d = state.dims.find((x) => x.id === id);
+  const t = d && textOf(d.textId);
+  if (!d || !t) return;
+  snapshot();
+  const o = { ...(d.override ?? {}) };
+  change(o);
+  d.override = Object.keys(o).length ? o : undefined;
+  convert(d, state.used.get(d.id) ?? state.settings);
+  renderDynamic();
+}
+
+$('dim-list').addEventListener('change', (ev) => {
+  const el = ev.target as HTMLInputElement | HTMLSelectElement;
+  const li = el.closest('li');
+  const id = li?.dataset.dim;
+  if (!id) return;
+  if (el.classList.contains('e-text')) {
+    const v = el.value;
+    editDimension(id, (o) => {
+      delete o.text;
+      // typed text is kept as it is, unless it is what the settings give anyway
+      const d = state.dims.find((x) => x.id === id)!;
+      const computed = replacementText({ ...d, override: o }, textOf(d.textId)!.text, state.used.get(d.id) ?? state.settings, state.sourceUnit);
+      if (v.trim() && v !== computed) o.text = v;
+    });
+  } else if (el.classList.contains('e-dec')) {
+    editDimension(id, (o) => {
+      delete o.text;
+      if (el.value === '') delete o.decimals;
+      else o.decimals = Number(el.value);
+    });
+  } else if (el.classList.contains('e-suf')) {
+    editDimension(id, (o) => {
+      delete o.text;
+      if (el.value === '') delete o.suffix;
+      else o.suffix = el.value.slice(1);
+    });
+  }
+});
 
 function renderReport(): void {
   const d = state.drawing;
@@ -336,6 +464,7 @@ function applyView(): void {
   const py = svg.clientHeight || 1;
   const unitsPerPx = Math.max(view.w / px, view.h / py);
   svg.style.setProperty('--hair', `${unitsPerPx}px`);
+  svg.style.setProperty('--hairn', String(unitsPerPx));
 }
 
 function fit(): void {
@@ -385,7 +514,22 @@ let pick: { x0: number; y0: number; x1: number; y1: number; id: number } | null 
 const selRect = document.getElementById('selection') as unknown as SVGRectElement;
 
 svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
+/** A converted text being moved with its handle. */
+let moving: { text: TextEntity; x: number; y: number; from: Pt; id: number; moved: boolean } | null = null;
+
 svg.addEventListener('pointerdown', (ev) => {
+  const handle = (ev.target as Element).closest?.('[data-handle]') as SVGElement | null;
+  if (handle && ev.button === 0) {
+    const t = textOf(handle.dataset.handle!);
+    if (t) {
+      ev.preventDefault();
+      const p = clientToSvg(ev.clientX, ev.clientY);
+      moving = { text: t, x: p.x, y: p.y, from: t.offset ?? { x: 0, y: 0 }, id: ev.pointerId, moved: false };
+      svg.setPointerCapture(ev.pointerId);
+      svg.classList.add('moving');
+      return;
+    }
+  }
   // right or middle button always pans; left button draws a box in "Add box" mode
   if (ev.button === 0 && mode === 'add' && state.drawing) {
     ev.preventDefault(); // no text selection while drawing a box
@@ -399,6 +543,17 @@ svg.addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) svg.setPointerCapture(ev.pointerId);
 });
 svg.addEventListener('pointermove', (ev) => {
+  if (moving && moving.id === ev.pointerId) {
+    const p = clientToSvg(ev.clientX, ev.clientY);
+    if (!moving.moved) {
+      snapshot();
+      moving.moved = true;
+    }
+    // SVG y is the negated drawing y
+    moving.text.offset = { x: moving.from.x + (p.x - moving.x), y: moving.from.y - (p.y - moving.y) };
+    renderLayer();
+    return;
+  }
   if (pick && pick.id === ev.pointerId) {
     const p = clientToSvg(ev.clientX, ev.clientY);
     pick.x1 = p.x;
@@ -425,6 +580,16 @@ svg.addEventListener('pointermove', (ev) => {
   applyView();
 });
 svg.addEventListener('pointerup', (ev) => {
+  if (moving && moving.id === ev.pointerId) {
+    const m = moving;
+    moving = null;
+    svg.classList.remove('moving');
+    if (m.moved) {
+      renderList();
+      toast('Moved the converted text. The original stays covered.', false, 4000, { label: 'Undo', run: undo });
+    }
+    return;
+  }
   if (pick && pick.id === ev.pointerId) {
     const p = pick;
     pick = null;
@@ -444,6 +609,8 @@ svg.addEventListener('pointerup', (ev) => {
   else toggleDimension(target.dataset.dim);
 });
 svg.addEventListener('pointercancel', () => {
+  moving = null;
+  svg.classList.remove('moving');
   drag = null;
   pick = null;
   selRect.setAttribute('hidden', '');
@@ -499,6 +666,32 @@ function locate(id: string): void {
 $('dim-list').addEventListener('click', (ev) => {
   const li = (ev.target as HTMLElement).closest('li');
   if (!li?.dataset.dim) return;
+  const id = li.dataset.dim;
+  const target = ev.target as HTMLElement;
+  if (target.closest('.expand')) {
+    if (expanded.has(id)) expanded.delete(id);
+    else expanded.add(id);
+    renderList();
+    return;
+  }
+  if (target.closest('.e-moveback')) {
+    const t = textOf(state.dims.find((x) => x.id === id)?.textId ?? '');
+    if (t) {
+      snapshot();
+      t.offset = undefined;
+      renderDynamic();
+    }
+    return;
+  }
+  if (target.closest('.e-reset')) {
+    editDimension(id, (o) => {
+      delete o.text;
+      delete o.decimals;
+      delete o.suffix;
+    });
+    return;
+  }
+  if (target.closest('.dim-edit')) return; // clicks in the edit panel do not convert
   if ((ev.target as HTMLElement).closest('.remove')) {
     removeDimension(li.dataset.dim);
     return;
@@ -538,18 +731,23 @@ interface Snapshot {
   entities: Entity[];
   dims: Dimension[];
   used: Map<string, ConversionSettings>;
+  /** Where converted texts had been moved to. */
+  offsets: Map<TextEntity, Pt | undefined>;
 }
 const undoStack: Snapshot[] = [];
 function snapshot(): void {
   const d = state.drawing;
   if (!d) return;
-  undoStack.push({ entities: [...d.entities], dims: state.dims.map((x) => ({ ...x })), used: new Map(state.used) });
+  const offsets = new Map<TextEntity, Pt | undefined>();
+  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, e.offset);
+  undoStack.push({ entities: [...d.entities], dims: state.dims.map((x) => ({ ...x })), used: new Map(state.used), offsets });
   if (undoStack.length > 50) undoStack.shift();
 }
 function undo(): void {
   const s = undoStack.pop();
   const d = state.drawing;
   if (!s || !d) return;
+  for (const [t, o] of s.offsets) t.offset = o;
   d.entities = s.entities;
   state.dims = s.dims;
   state.used = s.used;
@@ -769,7 +967,7 @@ $('open-settings').addEventListener('click', () => $<HTMLDialogElement>('setting
 $('ocr-again').addEventListener('click', () => {
   $<HTMLDialogElement>('settings-dialog').close();
   $('ocr-again').hidden = true;
-  if (state.file) void openFile(state.file, state.drawing?.pdf?.pageIndex ?? 0);
+  if (state.file) void openFile(state.file, state.drawing?.pdf?.pageIndex ?? 0, true);
 });
 
 $<HTMLInputElement>('highlight').addEventListener('change', (ev) => {
@@ -786,7 +984,9 @@ $<HTMLSelectElement>('page-select').addEventListener('change', (ev) => {
 $('export-dxf').addEventListener('click', () => {
   const d = state.drawing;
   if (!d) return;
-  if (d.source !== 'pdf' && d.dxf?.hasHandles) {
+  const moved = d.entities.some((e) => e.kind === 'text' && !!e.offset);
+  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was moved, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
+  else if (d.source !== 'pdf' && d.dxf?.hasHandles) {
     try {
       download(patchDxf(d, state.dims), `${baseName()}-converted.dxf`, 'application/dxf');
       return;
@@ -809,7 +1009,13 @@ $('export-pdf').addEventListener('click', async () => {
   if (!d) return;
   busy('Writing PDF…');
   try {
-    const res = d.source === 'pdf' ? await exportPdfOverlay(d, state.dims) : await exportPdfPlot(d, state.dims);
+    let res;
+    if (d.source === 'pdf' && d.pdf) {
+      // every page worked on goes into the one download
+      const pages = [...pageCache.values()].filter((p) => p.drawing.pdf!.pageIndex !== d.pdf!.pageIndex).map((p) => ({ d: p.drawing, dims: p.dims }));
+      pages.push({ d, dims: state.dims });
+      res = await exportPdfPages(docBytes ?? d.pdf.bytes, pages);
+    } else res = await exportPdfPlot(d, state.dims);
     download(res.bytes, `${baseName()}-converted.pdf`, 'application/pdf');
     if (res.warnings.length) toast(res.warnings.join(' '), false, 7000);
   } catch (err) {
