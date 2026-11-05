@@ -217,7 +217,8 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
       for (const dim of list.filter((x) => x.converted)) {
         const from = replaceStart(dim, t.text) / n;
         const to = dim.end / n;
-        polygon(page, textCorners(t, from - 0.02, to + 0.02).map((p) => apply(toUser, p)));
+        // a drawn box: its region, and nothing outside it
+        polygon(page, (t.cover?.length ? t.cover : textCorners(t, from - 0.02, to + 0.02)).map((p) => apply(toUser, p)));
         const startD = textCorners(t, from, to)[0];
         // textCorners()[0] is at the descender line; move up to the baseline
         const base = { x: startD.x - Math.sin(t.rotation) * 0.22 * t.fontSize, y: startD.y + Math.cos(t.rotation) * 0.22 * t.fontSize };

@@ -77,8 +77,17 @@ The **Boxes** controls in the side panel choose what a click on the drawing does
 * **− Remove box**: click a box to remove it. The **×** in the dimension list
   does the same in any mode.
 
-When a boxed value is converted, the whole region you drew is covered, so no
-part of the old text shows through (in the preview and the downloaded PDF).
+When a boxed value is converted, exactly the region you drew is whited out,
+and nothing outside it: no part of the old text inside the box shows through,
+and lines and text next to the box stay as they are (in the preview and the
+downloaded PDF). The value is then written again in the box.
+
+**Turning a box for angled dimensions:** when the pointer is near a box you
+drew, a small round handle appears above its top edge. Drag it to turn the box
+around its centre; the angle is shown while you drag. It snaps to upright and
+sideways within 3°, and Shift turns in 15° steps. When you let go, the text in
+the turned box is read again and shown for you to confirm; a converted box
+stays converted. Undo turns it back.
 
 Every add and remove can be undone with the **Undo** button in the message
 that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans

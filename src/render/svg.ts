@@ -186,7 +186,8 @@ export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
   if (!conv.length) return null;
   const cut = Math.min(...conv.map((d) => replaceStart(d, t.text)));
   const lay = layoutText(t, dims);
-  if (cut === 0 || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
+  // a drawn box is covered whole, so all of its text is written again
+  if (cut === 0 || t.cover?.length || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
   // where the value starts: the width of the text before it, in the text's own font
   const shift = Math.min(t.width, t.face ? textAdvance(t, t.text.slice(0, cut)) : (t.width * cut) / Math.max(1, t.text.length));
   const from = shift / Math.max(t.width, 1e-9);
@@ -201,10 +202,11 @@ export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
 /**
  * White areas laid over the original letters when an OCR or boxed value is
  * converted: the line from the first converted value on (a little taller than
- * the text, so ascenders, descenders and anti-aliasing are covered too) and,
- * for a box the user drew, the whole drawn region.
+ * the text, so ascenders, descenders and anti-aliasing are covered too). For a
+ * box the user drew, exactly the drawn region: nothing outside it is covered.
  */
 export function coverPolygons(t: TextEntity, patch: OcrPatch): Pt[][] {
+  if (t.cover?.length) return [t.cover];
   const dx = Math.cos(t.rotation);
   const dy = Math.sin(t.rotation);
   const shift = t.align === 'center' ? -t.width / 2 : t.align === 'right' ? -t.width : 0;
@@ -214,9 +216,7 @@ export function coverPolygons(t: TextEntity, patch: OcrPatch): Pt[][] {
   const v0 = -0.34 * t.fontSize;
   const v1 = 1.0 * t.fontSize;
   const at = (u: number, v: number): Pt => ({ x: t.pos.x + dx * u - dy * v, y: t.pos.y + dy * u + dx * v });
-  const out = [[at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]];
-  if (t.cover?.length) out.push(t.cover);
-  return out;
+  return [[at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]];
 }
 
 /** Polygon (drawing coordinates) around dimension `dimId` in a laid-out text. */
@@ -275,6 +275,28 @@ function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEnt
   );
 }
 
+/** Where the rotate handle of a drawn box sits: the middle of its top edge, and the box's angle. */
+export function rotateHandlePoint(cover: Pt[]): { p: Pt; angle: number } {
+  return { p: { x: (cover[2].x + cover[3].x) / 2, y: (cover[2].y + cover[3].y) / 2 }, angle: Math.atan2(cover[1].y - cover[0].y, cover[1].x - cover[0].x) };
+}
+
+/**
+ * The rotate handle of a box the user drew: a short stem up from the middle of
+ * its top edge with a round grip, in screen pixels. Shown near the box, like
+ * the move handles.
+ */
+export function rotateHandleSvg(id: string, cover: Pt[], extra = ''): string {
+  const { p, angle } = rotateHandlePoint(cover);
+  const xs = cover.map((q) => q.x);
+  const ys = cover.map((q) => q.y);
+  const near = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)].map(f).join(' ');
+  return (
+    `<g class="handle rot${extra}" data-rotate="${id}" data-near="${near}" transform="translate(${f(p.x)} ${f(p.y)}) rotate(${f((angle * 180) / Math.PI)})"><g class="handle-in">` +
+    `<line x1="0" y1="0" x2="0" y2="14"/><circle cy="20" r="6"/><path d="M-3 20a3 3 0 1 1 3 3M0 23l-1.8-1.6M0 23l-1.6 1.8"/>` +
+    `<title>Drag to turn the box</title></g></g>`
+  );
+}
+
 /** Dynamic part: texts that hold dimensions, plus the clickable highlight boxes. */
 export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighlights: boolean): { texts: string; overlays: string } {
   const byText = new Map<string, Dimension[]>();
@@ -316,6 +338,8 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
       overlays.push(`<polygon class="${cls}" data-dim="${dim.id}" points="${poly.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"><title>${esc(dim.original)}${dim.converted ? ' → ' + esc(dim.converted.text) : ''}</title></polygon>`);
     }
     if (drawn) handles.push(handleSvg(e, drawn, area));
+    // a box the user drew can be turned to follow an angled dimension
+    if (e.manual && e.cover?.length === 4) handles.push(rotateHandleSvg(e.id, e.cover));
   }
   // handles on top, so they can be grabbed where they overlap a box
   return { texts: texts.join(''), overlays: overlays.join('') + handles.join('') };

@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createCanvas } from '@napi-rs/canvas';
 import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { addBoxedText, dimensionCentre, textFromBox, textFromPlacement } from '../src/boxes';
+import { addBoxedText, boxPoly, dimensionCentre, polyAngle, polyCentre, rotatePoly, textFromBox, textFromPlacement } from '../src/boxes';
+import { pointInPoly, textCorners } from '../src/geom';
 import { convertDimension, detectDimensions } from '../src/dimensions';
 import { writeDxfR12 } from '../src/export/dxfR12';
 import { readRegion } from '../src/ocr/engine';
-import { renderDimensionLayer } from '../src/render/svg';
+import { coverPolygons, ocrPatch, renderDimensionLayer } from '../src/render/svg';
 import { DEFAULT_SETTINGS } from '../src/units';
 import DxfParser from 'dxf-parser';
 import { loadPdf, readSample } from './helpers';
@@ -116,4 +117,62 @@ describe('reading the text inside a box', () => {
     const texts = (await readRegion(m, img, 16, 200 / 25.4)).map((l) => l.text.replace(/\s/g, ''));
     expect(texts.some((t) => t.includes('11.2mm'))).toBe(true);
   }, 60000);
+});
+
+describe('the white-out of a drawn box', () => {
+  it('covers only the drawn region, even when the text runs past it', () => {
+    const box = { minX: 0, maxX: 10, minY: 0, maxY: 4 };
+    const d = { entities: [], blocks: {} } as never;
+    // text read wider and taller than the box (OCR placement, a long label)
+    const t = textFromPlacement('C-Z 11.2', { origin: { x: -3, y: 0.5 }, across: { x: 16, y: 0 }, up: { x: 0, y: 3.5 } }, '#000000');
+    const edit = addBoxedText(d, [], box, t);
+    const boxed = edit.entities.find((e: any) => e.manual) as any;
+    convertDimension(edit.dims[0], boxed.text, IN, 'mm');
+    const masks = coverPolygons(boxed, ocrPatch(boxed, edit.dims)!);
+    expect(masks).toEqual([boxPoly(box)]);
+    // the whole line is written again, since the whole box is white
+    expect(ocrPatch(boxed, edit.dims)!.text).toBe('C-Z 0.44 in');
+    const layer = renderDimensionLayer({ entities: edit.entities, blocks: {} } as never, edit.dims, true).texts;
+    expect(layer.match(/class="mask"/g)).toHaveLength(1);
+  });
+});
+
+describe('turned boxes', () => {
+  const box = { minX: 0, maxX: 20, minY: 0, maxY: 5 };
+  it('turns a box around its centre', () => {
+    const p = rotatePoly(boxPoly(box), Math.PI / 6);
+    expect(polyAngle(p)).toBeCloseTo(Math.PI / 6, 9);
+    expect(polyCentre(p).x).toBeCloseTo(10, 9);
+    expect(polyCentre(p).y).toBeCloseTo(2.5, 9);
+  });
+
+  it('places typed text along a turned box', () => {
+    const p = rotatePoly(boxPoly(box), Math.PI / 6);
+    const t = textFromBox('25.4', p);
+    expect(t.rotation).toBeCloseTo(Math.PI / 6, 9);
+    expect(pointInPoly(textCorners(t, 0.5, 0.5)[0], p)).toBe(true);
+    // a tall turned box reads along its long side
+    const tall = rotatePoly(boxPoly({ minX: 0, maxX: 5, minY: 0, maxY: 20 }), 0.3);
+    expect(textFromBox('25.4', tall).rotation).toBeCloseTo(0.3 + Math.PI / 2, 9);
+  });
+
+  it('a turned box covers and replaces what lies inside it', () => {
+    const p = rotatePoly(boxPoly(box), Math.PI / 4);
+    const d = { entities: [], blocks: {} } as never;
+    const edit = addBoxedText(d, [], p, textFromBox('25.4', p));
+    const boxed = edit.entities.find((e: any) => e.manual) as any;
+    expect(boxed.cover).toEqual(p);
+    convertDimension(edit.dims[0], boxed.text, IN, 'mm');
+    expect(coverPolygons(boxed, ocrPatch(boxed, edit.dims)!)).toEqual([p]);
+  });
+
+  it('gives each drawn box a rotate handle above its top edge', () => {
+    const p = rotatePoly(boxPoly(box), Math.PI / 2);
+    const d = { entities: [], blocks: {} } as never;
+    const edit = addBoxedText(d, [], p, textFromBox('25.4', p));
+    const html = renderDimensionLayer({ entities: edit.entities, blocks: {} } as never, edit.dims, true).overlays;
+    expect(html).toContain('class="handle rot"');
+    expect(html).toMatch(/data-rotate="[^"]+"/);
+    expect(html).toContain('rotate(90)');
+  });
 });
