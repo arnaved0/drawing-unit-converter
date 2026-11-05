@@ -1,7 +1,7 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
+import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
 import { addBoxedText, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
@@ -17,7 +17,7 @@ import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, 
 import { canvasRenderer } from './fonts/match';
 import { fixDiameters } from './ocr/diameter';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
-import { DEFAULT_SETTINGS, formatLength, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
+import { DEFAULT_SETTINGS, formatCustom, formatLength, parseFactor, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 const BASE = import.meta.env.BASE_URL;
@@ -55,7 +55,8 @@ interface State {
 const SETTINGS_KEY = 'duc.settings.v1';
 function loadSettings(): ConversionSettings {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') };
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}');
+    return { ...DEFAULT_SETTINGS, ...saved, custom: { ...DEFAULT_SETTINGS.custom, ...saved.custom } };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -266,7 +267,7 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
     if (ext === 'pdf') docBytes = pdfBytes;
     state.drawing = d;
     state.file = file;
-    state.dims = detectDimensions(d);
+    state.dims = detectDimensions(d, { customSuffix: customSuffix() });
     state.used = new Map();
     state.sourceUnit = d.detectedDimensionUnit;
     afterLoad();
@@ -299,6 +300,7 @@ function afterLoad(restore?: { undo: Snapshot[]; view: { x: number; y: number; w
   $('export-dxf').title = d.source === 'pdf' ? 'DXF (R12) with the recognised lines, arcs, circles, text and blocks' : 'DXF: the original file with only the converted texts changed';
   undoStack.length = 0;
   if (restore) undoStack.push(...restore.undo);
+  addCustomDimensions();
   setMode('convert');
   renderStatic();
   renderDynamic();
@@ -409,8 +411,6 @@ function renderList(): void {
 
 /** Dimensions whose edit panel is open in the list. */
 const expanded = new Set<string>();
-const SUFFIXES: [string, string][] = [['', 'None'], ['in', 'in'], ['"', '"'], ['mm', 'mm'], ['cm', 'cm'], ['m', 'm'], ['ft', 'ft'], ["'", "'"]];
-const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 
 /** What a dimension would read once converted with the current settings and its own. */
 function previewText(d: Dimension): string {
@@ -422,13 +422,9 @@ function editPanel(d: Dimension, t: TextEntity | undefined): string {
   const o = d.override ?? {};
   // ticked when the converted value has the sign: the drawing's own, or one the user added
   const dia = o.diameter ?? (!!t && hasDiameterSign(d, t.text));
-  const dec = ['<option value="">Default</option>', ...[0, 1, 2, 3, 4].map((n) => `<option value="${n}"${o.decimals === n ? ' selected' : ''}>${n}</option>`)].join('');
-  const suf = ['<option value="">Default</option>', ...SUFFIXES.map(([v, l]) => `<option value="${escHtml('=' + v)}"${o.suffix === v ? ' selected' : ''}>${escHtml(l)}</option>`)].join('');
   return (
     `<div class="dim-edit">` +
     `<label class="e-field e-wide"><span>Converted text</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
-    `<label class="e-field"><span>Decimals</span><select class="e-dec">${dec}</select></label>` +
-    `<label class="e-field"><span>Suffix</span><select class="e-suf">${suf}</select></label>` +
     `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>` +
     `<div class="e-actions">${t?.offset ? '<button class="btn small e-moveback">Move text back</button>' : ''}` +
     `${d.override ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
@@ -463,12 +459,6 @@ $('dim-list').addEventListener('change', (ev) => {
       const computed = replacementText({ ...d, override: o }, textOf(d.textId)!.text, state.used.get(d.id) ?? state.settings, state.sourceUnit);
       if (v.trim() && v !== computed) o.text = v;
     });
-  } else if (el.classList.contains('e-dec')) {
-    editDimension(id, (o) => {
-      delete o.text;
-      if (el.value === '') delete o.decimals;
-      else o.decimals = Number(el.value);
-    });
   } else if (el.classList.contains('e-dia')) {
     const on = (el as HTMLInputElement).checked;
     const d = state.dims.find((x) => x.id === id)!;
@@ -478,12 +468,6 @@ $('dim-list').addEventListener('change', (ev) => {
       // back to how the drawing writes it: no override
       if (on === own) delete o.diameter;
       else o.diameter = on;
-    });
-  } else if (el.classList.contains('e-suf')) {
-    editDimension(id, (o) => {
-      delete o.text;
-      if (el.value === '') delete o.suffix;
-      else o.suffix = el.value.slice(1);
     });
   }
 });
@@ -693,11 +677,42 @@ $('zoom-fit').addEventListener('click', fit);
 
 // ------------------------------------------------------------------ conversion
 
-function convert(d: Dimension, s: ConversionSettings): void {
+/** Converts `d`; false when the custom unit does not apply to it (it is in another unit). */
+function convert(d: Dimension, s: ConversionSettings): boolean {
   const t = textOf(d.textId);
-  if (!t) return;
+  if (!t || !canConvert(d, s)) return false;
   convertDimension(d, t.text, s, state.sourceUnit);
-  state.used.set(d.id, { ...s });
+  state.used.set(d.id, { ...s, custom: { ...s.custom } });
+  return true;
+}
+
+/** The custom unit's original suffix, while the custom unit is chosen. */
+const customSuffix = () => (state.settings.target === 'custom' ? state.settings.custom.from.trim() || undefined : undefined);
+
+/** Why the custom unit leaves a value alone. */
+function customSkipReason(): string {
+  const c = state.settings.custom;
+  if (state.settings.target !== 'custom') return 'it is in the custom unit; choose "Custom…" as the new unit to convert it';
+  return parseFactor(c.factor) === null
+    ? 'Enter a conversion factor for the custom unit (a number like 39.37, or a fraction like 1/25.4).'
+    : `it is not in the original unit${c.from.trim() ? ` (${c.from.trim()})` : ''}`;
+}
+
+/**
+ * Values written with the custom unit's original suffix ("12 u") become
+ * dimensions. Run when that suffix changes; nothing found before is removed.
+ */
+function addCustomDimensions(): void {
+  const d = state.drawing;
+  const suffix = customSuffix();
+  if (!d || !suffix) return;
+  for (const nd of detectDimensions(d, { customSuffix: suffix })) {
+    if (nd.suffix === undefined) continue;
+    const old = state.dims.find((x) => x.textId === nd.textId && x.start === nd.start);
+    if (!old) state.dims.push(nd);
+    else if (!old.converted && old.suffix === undefined) Object.assign(old, { end: nd.end, unit: nd.unit, spaced: nd.spaced, suffix: nd.suffix, original: nd.original });
+  }
+  state.dims.sort((a, b) => (a.textId === b.textId ? a.start - b.start : 0));
 }
 
 function toggleDimension(id: string): void {
@@ -707,7 +722,11 @@ function toggleDimension(id: string): void {
   if (d.converted && d.converted.key === key) {
     d.converted = undefined;
     state.used.delete(d.id);
-  } else convert(d, state.settings);
+  } else if (!convert(d, state.settings)) {
+    const why = customSkipReason();
+    toast(why.startsWith('Enter') ? why : `"${d.original}" was left as it is: ${why}.`, true, 6000);
+    return;
+  }
   renderDynamic();
 }
 
@@ -756,8 +775,6 @@ $('dim-list').addEventListener('click', (ev) => {
   if (target.closest('.e-reset')) {
     editDimension(id, (o) => {
       delete o.text;
-      delete o.decimals;
-      delete o.suffix;
       delete o.diameter;
     });
     return;
@@ -1001,6 +1018,7 @@ async function addBox(box: Box): Promise<void> {
   d.entities = edit.entities;
   state.dims = edit.dims;
   for (const id of edit.replaced) state.used.delete(id);
+  addCustomDimensions(); // "12 u" boxed: the custom suffix belongs to the value
   d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
   renderStatic();
   renderDynamic();
@@ -1018,8 +1036,13 @@ window.addEventListener('keydown', (ev) => {
 });
 
 $('convert-all').addEventListener('click', () => {
-  for (const d of state.dims) convert(d, state.settings);
+  let skipped = 0;
+  for (const d of state.dims) if (!convert(d, state.settings)) skipped++;
   renderDynamic();
+  if (skipped) {
+    const why = customSkipReason();
+    toast(why.startsWith('Enter') ? why : `${skipped} value${skipped === 1 ? ' was' : 's were'} left as ${skipped === 1 ? 'it is' : 'they are'}: ${why}.`, true, 6000);
+  }
 });
 $('reset-all').addEventListener('click', () => {
   for (const d of state.dims) d.converted = undefined;
@@ -1046,9 +1069,29 @@ function syncSettingsUi(): void {
   $('inch-field').hidden = !(s.target === 'in' || s.target === 'in-frac') || !s.showUnit;
   $('trim-zeros').parentElement!.hidden = frac;
   $('show-unit').parentElement!.hidden = s.target === 'ft-in';
-  const ex = formatLength(152.4, s);
-  const sep = ex.label && !ex.symbol ? ' ' : '';
-  $('example').textContent = `Example: 152.4 mm → ${ex.number}${ex.label ? sep + ex.label : ''}`;
+  // custom: "1 [from] = [factor] [to]" replaces the original unit
+  const custom = s.target === 'custom';
+  $('custom-unit').hidden = !custom;
+  $('source-field').hidden = custom;
+  $('to-sep').hidden = custom;
+  $('source-hint').hidden = custom;
+  $<HTMLInputElement>('custom-from').value = s.custom.from;
+  $<HTMLInputElement>('custom-factor').value = s.custom.factor;
+  $<HTMLInputElement>('custom-to').value = s.custom.to;
+  const factor = parseFactor(s.custom.factor);
+  $('custom-factor').setAttribute('aria-invalid', String(custom && factor === null));
+  if (custom) {
+    const from = s.custom.from.trim();
+    const ex = formatCustom(10 * (factor ?? NaN), s);
+    $('example').textContent =
+      factor === null
+        ? 'Enter a factor: a number like 39.37, or a fraction like 1/25.4.'
+        : `Example: 10${from ? ' ' + from : ''} → ${ex.number}${ex.label ? (ex.symbol ? '' : ' ') + ex.label : ''}. Values without a unit count as the original unit.`;
+  } else {
+    const ex = formatLength(152.4, s);
+    const sep = ex.label && !ex.symbol ? ' ' : '';
+    $('example').textContent = `Example: 152.4 mm → ${ex.number}${ex.label ? sep + ex.label : ''}`;
+  }
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
 }
 
@@ -1060,9 +1103,25 @@ function onSettings(): void {
   s.showUnit = $<HTMLInputElement>('show-unit').checked;
   s.inchLabel = $<HTMLSelectElement>('inch-label').value as ConversionSettings['inchLabel'];
   s.trimZeros = $<HTMLInputElement>('trim-zeros').checked;
+  s.custom = { from: $<HTMLInputElement>('custom-from').value, factor: $<HTMLInputElement>('custom-factor').value, to: $<HTMLInputElement>('custom-to').value };
   syncSettingsUi();
 }
-for (const id of ['target', 'decimals', 'denominator', 'show-unit', 'inch-label', 'trim-zeros']) $(id).addEventListener('change', onSettings);
+/** Values written with the original suffix become dimensions (once the suffix is entered, not while it is typed). */
+function onCustomCommitted(): void {
+  onSettings();
+  if (state.drawing && customSuffix()) {
+    const before = state.dims.length;
+    addCustomDimensions();
+    if (state.dims.length !== before || state.dims.some((x) => x.suffix !== undefined)) renderDynamic();
+  }
+}
+for (const id of ['decimals', 'denominator', 'show-unit', 'inch-label', 'trim-zeros']) $(id).addEventListener('change', onSettings);
+$('target').addEventListener('change', onCustomCommitted);
+for (const id of ['custom-from', 'custom-factor', 'custom-to']) {
+  // the example follows the typing; the drawing is searched when the field is left or Enter pressed
+  $(id).addEventListener('input', onSettings);
+  $(id).addEventListener('change', onCustomCommitted);
+}
 
 $('source-unit').addEventListener('change', () => {
   state.sourceUnit = $<HTMLSelectElement>('source-unit').value as LengthUnit;

@@ -84,6 +84,24 @@ Every add and remove can be undone with the **Undo** button in the message
 that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans
 the drawing in every mode.
 
+### Custom unit
+
+Choose **Custom…** as the new unit and fill in one line:
+
+`1 [original suffix] = [factor] [new suffix]`
+
+for example `1 mm = 39.37 mil`, or `1 u = 2.5 pt` for a unit of your own. The
+factor can be a number or a fraction (`1/25.4`). Every converted value is
+multiplied by it and gets the new suffix; decimal places, trailing zeros and
+"Add unit label" from Settings still apply.
+
+* Values without a unit, and values written with the original suffix
+  (`12 u`, `12u`), are in the original unit. A suffix of your own makes those
+  values clickable as soon as you leave the field.
+* If the original suffix is a standard unit (`mm`, `in` …), values in other
+  standard units are converted to it first (`5 in` with `1 mm = 2 mm` gives
+  `254.00 mm`). Otherwise they are left as they are, with a message.
+
 ### Editing one dimension
 
 Each row in the **Dimensions** list has a **⌄** button that opens a small
@@ -91,8 +109,6 @@ panel for that dimension:
 
 * **Converted text**: type exactly what the new value should read
   (for example `6 IN. TYP`). Applied when you press Enter or leave the field.
-* **Decimals** and **Suffix**: override the Settings for this dimension only
-  (for example 0 decimals and `"` gives `6"`; **None** drops the unit label).
 * **Diameter sign (Ø)**: add a Ø in front of the converted value, or take
   out the drawing's own.
 * **Reset** clears these overrides. **Move text back** undoes a move (see below).

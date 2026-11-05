@@ -30,15 +30,6 @@ async function pdfText(bytes: Uint8Array, page: number): Promise<string> {
 }
 
 describe('settings for one dimension', () => {
-  it('uses its own decimal places', () => {
-    expect(replacementText({ ...dim('152.4'), override: { decimals: 0 } }, '152.4', IN, 'mm')).toBe('6 in');
-    expect(replacementText({ ...dim('88.9'), override: { decimals: 3 } }, '88.9', IN, 'mm')).toBe('3.500 in');
-  });
-  it('uses its own suffix, or none', () => {
-    expect(replacementText({ ...dim('152.4'), override: { suffix: '"' } }, '152.4', IN, 'mm')).toBe('6.00"');
-    expect(replacementText({ ...dim('152.4'), override: { suffix: '' } }, '152.4', IN, 'mm')).toBe('6.00');
-    expect(replacementText({ ...dim('381 mm'), override: { suffix: 'inch' } }, '381 mm', IN, 'mm')).toBe('15.00 inch');
-  });
   it('uses text typed by the user as it is', () => {
     expect(replacementText({ ...dim('88.9'), override: { text: '3-1/2 IN.' } }, '88.9', IN, 'mm')).toBe('3-1/2 IN.');
   });
