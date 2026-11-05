@@ -180,6 +180,27 @@ export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
   };
 }
 
+/**
+ * White areas laid over the original letters when an OCR or boxed value is
+ * converted: the line from the first converted value on (a little taller than
+ * the text, so ascenders, descenders and anti-aliasing are covered too) and,
+ * for a box the user drew, the whole drawn region.
+ */
+export function coverPolygons(t: TextEntity, patch: OcrPatch): Pt[][] {
+  const dx = Math.cos(t.rotation);
+  const dy = Math.sin(t.rotation);
+  const shift = t.align === 'center' ? -t.width / 2 : t.align === 'right' ? -t.width : 0;
+  const padX = 0.12 * t.fontSize;
+  const u0 = shift + t.width * patch.from - (patch.from > 0 ? padX / 2 : padX);
+  const u1 = shift + t.width + padX;
+  const v0 = -0.34 * t.fontSize;
+  const v1 = 1.0 * t.fontSize;
+  const at = (u: number, v: number): Pt => ({ x: t.pos.x + dx * u - dy * v, y: t.pos.y + dy * u + dx * v });
+  const out = [[at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]];
+  if (t.cover?.length) out.push(t.cover);
+  return out;
+}
+
 /** Polygon (drawing coordinates) around dimension `dimId` in a laid-out text. */
 export function dimPolygon(t: TextEntity, layout: TextLayout, dimId: string): Pt[] {
   const r = layout.display.ranges.get(dimId);
@@ -209,14 +230,13 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
     if (e.ocr) {
       const patch = ocrPatch(e, list);
       if (patch) {
-        const pad = (0.1 * e.fontSize) / Math.max(e.width, 1e-9);
-        const mask = textCorners(e, Math.max(-pad, patch.from - pad / 2), 1 + pad);
-        texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
+        for (const mask of coverPolygons(e, patch)) texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
         texts.push(textSvg(e, patch.text, patch.pos, patch.align, 'converted'));
       }
     } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, layout.display.changed ? 'converted' : ''));
     for (const dim of list) {
-      const poly = dimPolygon(e, layout, dim.id);
+      // a box the user drew stays the box they drew
+      const poly = e.cover && list.length === 1 ? e.cover : dimPolygon(e, layout, dim.id);
       const cls = `dim${dim.converted ? ' converted' : ''}${showHighlights ? '' : ' quiet'}`;
       overlays.push(`<polygon class="${cls}" data-dim="${dim.id}" points="${poly.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"><title>${esc(dim.original)}${dim.converted ? ' → ' + esc(dim.converted.text) : ''}</title></polygon>`);
     }

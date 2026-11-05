@@ -238,7 +238,7 @@ function afterLoad(): void {
   } else pageSel.hidden = true;
   $<HTMLSelectElement>('source-unit').value = state.sourceUnit;
   $('source-hint').textContent =
-    d.source === 'pdf' ? `Detected from the drawing's notes and labels: ${d.detectedDimensionUnit}.` : `From the file's unit setting and labels: ${d.detectedDimensionUnit}.`;
+    `Used for values written without a unit (detected ${d.source === 'pdf' ? "from the drawing's notes" : "from the file's settings"}: ${d.detectedDimensionUnit}). Values like "381 mm" keep their own unit.`;
   for (const id of ['export-dxf', 'export-pdf', 'convert-all', 'reset-all']) $<HTMLButtonElement>(id).disabled = false;
   $<HTMLButtonElement>('export-dxf12').disabled = d.source === 'pdf';
   $('export-dxf12').hidden = d.source === 'pdf';
@@ -388,6 +388,7 @@ svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
 svg.addEventListener('pointerdown', (ev) => {
   // right or middle button always pans; left button draws a box in "Add box" mode
   if (ev.button === 0 && mode === 'add' && state.drawing) {
+    ev.preventDefault(); // no text selection while drawing a box
     const p = clientToSvg(ev.clientX, ev.clientY);
     pick = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, id: ev.pointerId };
     svg.setPointerCapture(ev.pointerId);
@@ -764,7 +765,9 @@ ocrBox.addEventListener('change', () => {
   // offer to apply the new setting to the PDF that is open
   $('ocr-again').hidden = !(state.file && state.drawing?.source === 'pdf');
 });
+$('open-settings').addEventListener('click', () => $<HTMLDialogElement>('settings-dialog').showModal());
 $('ocr-again').addEventListener('click', () => {
+  $<HTMLDialogElement>('settings-dialog').close();
   $('ocr-again').hidden = true;
   if (state.file) void openFile(state.file, state.drawing?.pdf?.pageIndex ?? 0);
 });

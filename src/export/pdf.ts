@@ -33,7 +33,7 @@ import { displayColor } from '../aci';
 import type { Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
-import { layoutText, ocrPatch } from '../render/svg';
+import { coverPolygons, layoutText, ocrPatch } from '../render/svg';
 
 function hexRgb(hex: string) {
   const v = parseInt(hex.replace('#', '').slice(0, 6), 16) || 0;
@@ -102,9 +102,8 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[]): Promise<{
     const safe = winAnsiSafe(font, patch ? patch.text : lay.text);
 
     if (patch && !safe.lossy) {
-      // OCR text: cover the line from the first converted value on and write the new part
-      const pad = (0.08 * t.fontSize) / Math.max(t.width, 1e-9);
-      polygon(page, textCorners(t, Math.max(-pad, patch.from - pad / 2), 1 + pad).map((p) => apply(toUser, p)));
+      // OCR / boxed text: cover the old value (and the whole drawn box) and write the new part
+      for (const mask of coverPolygons(t, patch)) polygon(page, mask.map((p) => apply(toUser, p)));
       const w = font.widthOfTextAtSize(safe.text, size);
       const anchor = apply(toUser, patch.pos);
       const len = Math.hypot(dirU.x, dirU.y) || 1;

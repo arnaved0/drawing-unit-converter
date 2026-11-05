@@ -9,8 +9,11 @@ click a dimension to convert it to another unit, then download the result as
 ## How to use
 
 1. Click **Open drawing…** or drop a file on the page.
-2. In the side panel, choose the target unit (mm, cm, m, decimal inches,
-   fractional inches, feet, feet-and-inches), the precision and the label style.
+2. In the side panel, pick the **Original unit** (used for values written
+   without a unit, detected from notes like "Length in mm") and the **New unit**
+   (mm, cm, m, decimal inches, fractional inches, feet, feet-and-inches).
+   Decimal places, fraction rounding, unit labels, Scan & OCR and highlighting
+   are under **Settings**.
 3. Click a highlighted dimension in the drawing (or in the list) to convert it.
    Click it again to undo. **Convert all** and **Reset all** work on every dimension.
 4. Download:
@@ -55,7 +58,7 @@ over the original, from the value to the end of its line. In the DXF, the
 letter shapes are replaced by TEXT entities. The downloaded PDF keeps the
 searchable text layer.
 
-The step can be switched off in the side panel (**Read text with Scan & OCR
+The step can be switched off under **Settings** (**Read text with Scan & OCR
 first**). Characters the standard PDF font cannot hold (Chinese, for example)
 are not added to the text layer; they stay as drawn.
 
@@ -72,6 +75,9 @@ The **Boxes** controls in the side panel choose what a click on the drawing does
   a length (angles excepted). A box drawn over a wrongly read value replaces it.
 * **− Remove box**: click a box to remove it. The **×** in the dimension list
   does the same in any mode.
+
+When a boxed value is converted, the whole region you drew is covered, so no
+part of the old text shows through (in the preview and the downloaded PDF).
 
 Every add and remove can be undone with the **Undo** button in the message
 that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans

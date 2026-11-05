@@ -123,6 +123,8 @@ export interface TextEntity extends Base {
   ocr?: boolean;
   /** Added by the user with a box. */
   manual?: boolean;
+  /** The region the user drew (drawing coordinates): covered whole when the value is converted. */
+  cover?: Pt[];
   dxf?: DxfTextSource;
 }
 

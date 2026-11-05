@@ -108,8 +108,10 @@ export function addBoxedText(d: Drawing, dims: Dimension[], box: Box, t: TextEnt
       .map((e) => e.id),
   );
   const ids = new Set(replaced.map((x) => x.id));
+  // the drawn region is covered whole once the value is converted, so no old text shows through
+  const boxed: TextEntity = { ...t, cover: poly };
   return {
-    entities: [...d.entities.filter((e) => !drop.has(e.id)), t],
+    entities: [...d.entities.filter((e) => !drop.has(e.id)), boxed],
     dims: [...dims.filter((x) => !ids.has(x.id) && !drop.has(x.textId)), ...dimensionsOf(t)],
     replaced: [...ids],
   };

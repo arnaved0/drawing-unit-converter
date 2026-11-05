@@ -35,6 +35,25 @@ describe('adding a box by hand', () => {
     expect(parsed.entities.some((e: any) => e.type === 'TEXT' && e.text === '1.00 in')).toBe(true);
   });
 
+  it('covers the whole drawn region once the boxed value is converted', async () => {
+    const d = await loadPdf('defrost-heater.pdf');
+    const box = { minX: 300, maxX: 330, minY: 20, maxY: 32 };
+    // text placed smaller than the box, as OCR placement often is
+    const t = textFromPlacement('1.6mm', { origin: { x: 305, y: 24 }, across: { x: 12, y: 0 }, up: { x: 0, y: 3 } }, '#000000');
+    const edit = addBoxedText(d, [], box, t);
+    d.entities = edit.entities;
+    const boxed = d.entities.find((e) => e.kind === 'text' && e.manual) as any;
+    expect(boxed.cover).toHaveLength(4);
+    const before = renderDimensionLayer(d, edit.dims, true).texts;
+    expect(before).not.toContain('class="mask"'); // nothing is covered until it is converted
+    convertDimension(edit.dims[0], boxed.text, IN, 'mm');
+    const layer = renderDimensionLayer(d, edit.dims, true);
+    const corners = '300,20 330,20 330,32 300,32';
+    expect(layer.texts).toContain(`<polygon class="mask" points="${corners}"/>`);
+    // the clickable highlight is the drawn box too
+    expect(layer.overlays).toContain(`points="${corners}"`);
+  });
+
   it('counts a bare number as a length inside a box, but not an angle', () => {
     const box = { minX: 0, maxX: 30, minY: 0, maxY: 5 };
     const d = { entities: [], blocks: {} } as never;
