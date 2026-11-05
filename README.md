@@ -97,7 +97,10 @@ multiplied by it and gets the new suffix; decimal places, trailing zeros and
 
 * Values without a unit, and values written with the original suffix
   (`12 u`, `12u`), are in the original unit. A suffix of your own makes those
-  values clickable as soon as you leave the field.
+  values clickable as soon as you leave the field. It works for any unit,
+  not only lengths: `1 V = 1/1000 kV` or `1 ° = 0.0174533 rad` make `480V`
+  and `45°` convertible, in the scan and in boxes you draw. A prefixed form
+  (`3.5 kV` when the original suffix is `V`) is a different unit and is left alone.
 * If the original suffix is a standard unit (`mm`, `in` …), values in other
   standard units are converted to it first (`5 in` with `1 mm = 2 mm` gives
   `254.00 mm`). Otherwise they are left as they are, with a message.

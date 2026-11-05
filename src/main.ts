@@ -918,10 +918,15 @@ async function readBoxText(d: Drawing, box: Box): Promise<{ text: string; placem
     const img = ctx.getImageData(0, 0, w, h);
     const lines = await recogniseInWorker({ width: w, height: h, data: img.data.slice() }, pxPerMm, pad);
     if (!lines.length) return null;
-    // prefer a line that holds a length, then the most confident one
+    // prefer a line that holds a length (or a value in the custom unit), then the most confident one
+    const suffix = customSuffix();
+    const holds = (text: string) => {
+      const toks = findLengthTokens(text, { isDimension: true, customSuffix: suffix });
+      return toks.some((t) => t.suffix !== undefined) ? 2 : toks.length ? 1 : 0;
+    };
     const scored = lines
       .map((l) => ({ l, text: normaliseOcrText(l.text) ?? l.text }))
-      .sort((a, b) => Number(findLengthTokens(b.text, { isDimension: true }).length > 0) - Number(findLengthTokens(a.text, { isDimension: true }).length > 0) || b.l.confidence - a.l.confidence);
+      .sort((a, b) => holds(b.text) - holds(a.text) || b.l.confidence - a.l.confidence);
     const best = { ...scored[0] };
     const map = (x: number, y: number): [number, number] => {
       const [ux, uy] = vp.convertToPdfPoint(x + x0, y + y0) as number[];
@@ -1008,10 +1013,17 @@ async function addBox(box: Box): Promise<void> {
   // written like the letters in the box (or, when none were read, like the page's other text)
   Object.assign(t, read?.style ?? pageStyle(d) ?? {});
   if (t.face) t.width = advance(getFace(t.face), text) * t.fontSize * (t.hscale ?? 1);
-  const edit = addBoxedText(d, state.dims, box, t);
+  const edit = addBoxedText(d, state.dims, box, t, customSuffix());
   const added = edit.dims.filter((x) => x.textId === t.id);
   if (!added.length) {
-    toast(`"${text}" holds no length to convert (angles and counts are left alone).`, true, 6000);
+    const c = state.settings.custom;
+    toast(
+      state.settings.target === 'custom' && c.from.trim()
+        ? `"${text}" holds no value in the original unit (${c.from.trim()}). Write it as it appears, for example "12${c.from.trim()}".`
+        : `"${text}" holds no length to convert (angles and counts are left alone). For other units, choose "Custom…" as the new unit.`,
+      true,
+      7000,
+    );
     return;
   }
   snapshot();

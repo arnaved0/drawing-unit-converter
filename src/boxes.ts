@@ -64,9 +64,12 @@ export function textFromBox(text: string, b: Box, color = '#000000'): TextEntity
 }
 
 let counter = 0;
-/** Dimensions in a text the user boxed. */
-export function dimensionsOf(t: TextEntity): Dimension[] {
-  return findLengthTokens(t.text, { isDimension: true }).map((tok) => {
+/**
+ * Dimensions in a text the user boxed. `customSuffix` is the custom unit's
+ * original suffix: values written with it count too ("12V", "45°").
+ */
+export function dimensionsOf(t: TextEntity, customSuffix?: string): Dimension[] {
+  return findLengthTokens(t.text, { isDimension: true, customSuffix }).map((tok) => {
     counter += 1;
     return { ...tok, id: `m${counter}`, textId: t.id, original: t.text.slice(tok.start, tok.end) };
   });
@@ -93,7 +96,7 @@ export interface BoxEdit {
  * (the box corrects them), and OCR texts that lie wholly inside it are dropped
  * so the DXF does not get the same text twice.
  */
-export function addBoxedText(d: Drawing, dims: Dimension[], box: Box, t: TextEntity): BoxEdit {
+export function addBoxedText(d: Drawing, dims: Dimension[], box: Box, t: TextEntity, customSuffix?: string): BoxEdit {
   const poly = [
     { x: box.minX, y: box.minY },
     { x: box.maxX, y: box.minY },
@@ -112,7 +115,7 @@ export function addBoxedText(d: Drawing, dims: Dimension[], box: Box, t: TextEnt
   const boxed: TextEntity = { ...t, cover: poly };
   return {
     entities: [...d.entities.filter((e) => !drop.has(e.id)), boxed],
-    dims: [...dims.filter((x) => !ids.has(x.id) && !drop.has(x.textId)), ...dimensionsOf(t)],
+    dims: [...dims.filter((x) => !ids.has(x.id) && !drop.has(x.textId)), ...dimensionsOf(t, customSuffix)],
     replaced: [...ids],
   };
 }

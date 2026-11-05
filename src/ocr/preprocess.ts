@@ -42,6 +42,8 @@ const WIN_ANSI = /^[\x20-\x7e\u00a0-\u00ff\u20ac\u2013\u2014\u2018\u2019\u201c\u
 export function normaliseOcrText(s: string): string | null {
   const t = s
     .normalize('NFKC')
+    // a small degree sign read as "*" (also full-width, NFKC makes it "*") or "º"
+    .replace(/(?<=\d)\s?[*\u00ba\u02da](?=$|[\s,;)\]])/g, '\u00b0')
     // diameter sign look-alikes; a lower-case ø only in front of a number
     .replace(/[\u2300\u2205\u03a6\u03c6]/g, '\u00d8')
     .replace(/\u00f8(?=\s?\d)/g, '\u00d8')

@@ -144,6 +144,8 @@ function scan(text: string, customSuffix?: string): Candidate[] {
       rest = text.slice(end);
     }
     if (DEGREE_RE.test(rest)) continue;
+    // the custom suffix with a prefix ("3.5 kV" when the unit is V) is another unit
+    if (!suffix && own && new RegExp(`^\\s?[A-Za-z\u00b5]{1,2}${escRe(customSuffix!.trim())}(?![A-Za-z])`, 'i').test(rest)) continue;
     if (unit === null && !suffix) {
       if (/^[A-Za-z%]/.test(rest) && !/^[xX\u00d7]\s?\d/.test(rest)) continue; // 120V, 304SS, 18UNF, 8X
       if (/^\s?[-:/]\s?\d/.test(rest)) continue; // ranges, dates, ratios

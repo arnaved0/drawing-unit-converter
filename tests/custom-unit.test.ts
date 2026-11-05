@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { canConvert, convertDimension, detectDimensions, displayText, findLengthTokens, replacementText, type Dimension } from '../src/dimensions';
+import { addBoxedText, textFromBox } from '../src/boxes';
+import { cleanOcrText } from '../src/ocr/engine';
+import { normaliseOcrText } from '../src/ocr/preprocess';
 import { writeDxfR12 } from '../src/export/dxfR12';
 import type { Drawing, TextEntity } from '../src/model';
 import { DEFAULT_SETTINGS, parseFactor, settingsKey, type ConversionSettings, type CustomUnit } from '../src/units';
@@ -93,5 +96,39 @@ describe('custom unit', () => {
     const s = custom({ from: 'u', factor: '2.5', to: 'pt' });
     convertDimension(dims[0], t.text, s, 'mm');
     expect(writeDxfR12(d, dims)).toContain('Pitch 30.00 pt');
+  });
+});
+
+describe('custom unit in boxes the user draws', () => {
+  const box = { minX: 0, minY: 0, maxX: 20, maxY: 5 };
+  const empty = { name: 'x', source: 'pdf', entities: [], blocks: {}, bounds: box, geometryUnit: 'mm', detectedDimensionUnit: 'mm', stats: {} as never, warnings: [] } as unknown as Drawing;
+  const found = (text: string, suffix?: string) => addBoxedText(empty, [], box, textFromBox(text, box), suffix).dims.map((x) => x.original);
+
+  it('finds volts and degrees when they are the original unit', () => {
+    expect(found('120V')).toEqual([]);
+    expect(found('120V', 'V')).toEqual(['120V']);
+    expect(found('480V 3PH 27KW', 'V')).toEqual(['480V']);
+    expect(found('45°')).toEqual([]);
+    expect(found('45°', '°')).toEqual(['45°']);
+    expect(found('HOT ZONE 104.0°', '°')).toEqual(['104.0°']);
+    expect(found('45 deg', 'deg')).toEqual(['45 deg']);
+    expect(found('3.5 kV', 'V')).toEqual([]);
+  });
+
+  it('reads a degree sign that OCR saw as * or º', () => {
+    expect(cleanOcrText('112*')).toBe('112\u00b0');
+    expect(cleanOcrText('86.0\u00ba')).toBe('86.0\u00b0');
+    expect(cleanOcrText('A*B 2*3')).toBe('A*B 2*3');
+    expect(normaliseOcrText('112\uff0a')).toBe('112\u00b0');
+  });
+
+  it('converts them with the factor and the new suffix', () => {
+    const v = custom({ from: 'V', factor: '1/1000', to: 'kV' }, { decimals: 3 });
+    expect(conv('480V 3PH', v)).toBe('0.480kV 3PH');
+    const deg = custom({ from: '°', factor: '0.0174533', to: 'rad' });
+    expect(conv('45°', deg)).toBe('0.79rad');
+    expect(conv('HOT ZONE 104.0°', deg)).toBe('HOT ZONE 1.82rad');
+    const toDeg = custom({ from: 'rad', factor: '57.2958', to: '°' }, { decimals: 1 });
+    expect(conv('1.5 rad', toDeg)).toBe('85.9°');
   });
 });
