@@ -27,6 +27,8 @@ export interface PreprocessResult {
   unsupported: number;
   /** The face each added line was matched to (for importPdf's textStyles). */
   styles: TextStyleHint[];
+  /** The page as rendered for reading, and its viewport transform (PDF user space -> pixels). */
+  image?: { width: number; height: number; data: Uint8ClampedArray; transform: number[] };
 }
 
 /** OCR box -> text placement. PP-OCR boxes are padded around the glyphs. */
@@ -187,7 +189,8 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
   });
   opts.onProgress?.(1, 'Adding the text layer');
   const out = await withTextLayers(bytes, new Map([[pageIndex, words]]));
-  return { bytes: new Uint8Array(out), added: words.length, alreadyText, unsupported, styles };
+  const image = { width: pixels.width, height: pixels.height, data: pixels.data, transform: vp.transform as number[] };
+  return { bytes: new Uint8Array(out), added: words.length, alreadyText, unsupported, styles, image };
 }
 
 /** Face fits for OCR lines (null where the letters could not be measured). */

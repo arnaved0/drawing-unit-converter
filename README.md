@@ -197,6 +197,17 @@ every Ø was found, with its spacing (`Ø 96.5` stays spaced), and none was
 added to drawings without one. Boxes you draw are read the same way, and the
 box dialog has a **Ø** button for typing it.
 
+### What is whited out
+
+When a page is opened, the letters of every text on it are found on the page
+(dimension and extension lines running under or through the text are told
+apart from the letters). A conversion then whites out only the outlines of
+the letters it replaces, so lines under the value and words next to it stay
+as they are. The rest of the line is kept too, unless the new value is wider
+than the old one; then the rest of the line is written again so the two do
+not overlap. Where the letters cannot be found, a narrow band around the
+value is used.
+
 ### Fractional inches and feet
 
 Values written in fractions and feet-inches are read as one length:
@@ -231,7 +242,7 @@ like "Length in mm" or the DXF `$INSUNITS` setting, and can be changed in the pa
   lines stay an image. They are not traced into DXF geometry.
 * PDF geometry is exported at paper scale (1 mm on the sheet = 1 drawing unit),
   not at the real size of the part.
-* In PDF output, the old value is covered with a white box and the new value is
+* In PDF output, the old value's letters are covered in white and the new value is
   drawn on top in the matching font. The old text is still in the file
   underneath, so copy/search can find it.
 * The fonts are lookalikes, not the drawing's own font files. A font that looks

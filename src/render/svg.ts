@@ -8,6 +8,7 @@ import type { Dimension, DisplayText } from '../dimensions';
 import { displayText, isStandaloneDimension, replaceStart } from '../dimensions';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity, Vertex } from '../model';
 import { advance, getFace } from '../fonts/faces';
+import { inkBetween } from '../ink';
 
 const f = (v: number) => (Math.abs(v) < 1e-9 ? '0' : +v.toFixed(4) + '');
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -170,16 +171,21 @@ export function layoutText(t: TextEntity, dims: Dimension[]): TextLayout {
 export interface OcrPatch {
   /** Fraction of the text's width where the redrawn part starts. */
   from: number;
+  /** Fraction where it ends: 1 when the rest of the line is redrawn too. */
+  to: number;
+  /** The characters of the original text it replaces. */
+  chars?: [number, number];
   text: string;
   pos: Pt;
   align: TextEntity['align'];
 }
 
 /**
- * For OCR text, the original letters stay visible (outlines or image). A
- * conversion covers the line from its first converted value to the end and
- * redraws only that part, so text before it keeps its original look and an
- * OCR misread elsewhere in the line never reaches the output.
+ * The part of a text a conversion rewrites. The original letters stay on the
+ * page (outlines, image, or PDF text), so only the converted values are
+ * whited out and written again; text before and after keeps its original
+ * look. When a new value is wider than the old one, the rest of the line is
+ * written again too, so it does not run into what follows.
  */
 export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
   const conv = dims.filter((d) => d.converted);
@@ -187,34 +193,64 @@ export function ocrPatch(t: TextEntity, dims: Dimension[]): OcrPatch | null {
   const cut = Math.min(...conv.map((d) => replaceStart(d, t.text)));
   const lay = layoutText(t, dims);
   // a drawn box is covered whole, so all of its text is written again
-  if (cut === 0 || t.cover?.length || isStandaloneDimension(t.text, dims)) return { from: 0, text: lay.text, pos: lay.pos, align: lay.align };
+  if (t.cover?.length || isStandaloneDimension(t.text, dims)) return { from: 0, to: 1, chars: [0, [...t.text].length], text: lay.text, pos: lay.pos, align: lay.align };
   // where the value starts: the width of the text before it, in the text's own font
-  const shift = Math.min(t.width, t.face ? textAdvance(t, t.text.slice(0, cut)) : (t.width * cut) / Math.max(1, t.text.length));
+  const adv = (n: number) => Math.min(t.width, t.face ? textAdvance(t, t.text.slice(0, n)) : (t.width * n) / Math.max(1, t.text.length));
+  const shift = adv(cut);
   const from = shift / Math.max(t.width, 1e-9);
+  // the last converted value, in the original and in the new text
+  const last = conv.reduce((a, b) => (b.end > a.end ? b : a));
+  const dispEnd = lay.display.ranges.get(last.id)?.end ?? lay.text.length;
+  let to = 1;
+  let endChar = t.text.length;
+  let text = lay.text.slice(cut);
+  if (last.end < t.text.length) {
+    const oldW = adv(last.end) - shift;
+    const newW = textAdvance(t, lay.text.slice(cut, dispEnd)) * (t.sizeScale ?? 1);
+    // the new values fit where the old ones were: what follows stays as it is
+    if (newW <= oldW + 0.15 * t.fontSize) {
+      to = adv(last.end) / Math.max(t.width, 1e-9);
+      endChar = last.end;
+      text = lay.text.slice(cut, dispEnd).replace(/\s+$/, '');
+    }
+  }
+  // the text is indexed by UTF-16 units; the ink by characters
+  const charAt = (n: number) => [...t.text.slice(0, n)].length;
   return {
     from,
-    text: lay.text.slice(cut),
-    pos: { x: t.pos.x + Math.cos(t.rotation) * shift, y: t.pos.y + Math.sin(t.rotation) * shift },
+    to,
+    chars: [charAt(cut), charAt(endChar)],
+    text,
+    // measured from the left end of the text
+    pos: (() => {
+      const left = t.align === 'center' ? -t.width / 2 : t.align === 'right' ? -t.width : 0;
+      return { x: t.pos.x + Math.cos(t.rotation) * (left + shift), y: t.pos.y + Math.sin(t.rotation) * (left + shift) };
+    })(),
     align: 'left',
   };
 }
 
 /**
- * White areas laid over the original letters when an OCR or boxed value is
- * converted: the line from the first converted value on (a little taller than
- * the text, so ascenders, descenders and anti-aliasing are covered too). For a
- * box the user drew, exactly the drawn region: nothing outside it is covered.
+ * White areas laid over the original letters when a value is converted: the
+ * outline of each letter that is written again (measured on the page, see
+ * src/ink.ts), so lines under or through the text and words next to it stay.
+ * Without measured letters, a band just around the letters. For a box the
+ * user drew, exactly the drawn region: nothing outside it is covered.
  */
-export function coverPolygons(t: TextEntity, patch: OcrPatch): Pt[][] {
+export function coverPolygons(t: TextEntity, patch: { from: number; to: number; chars?: [number, number] }): Pt[][] {
   if (t.cover?.length) return [t.cover];
+  const shift = t.align === 'center' ? -t.width / 2 : t.align === 'right' ? -t.width : 0;
+  const uFrom = shift + t.width * patch.from;
+  const uTo = shift + t.width * patch.to;
+  const letters = inkBetween(t, uFrom, patch.to >= 1 ? uTo + 0.3 * t.fontSize : uTo, patch.chars);
+  if (letters) return letters;
   const dx = Math.cos(t.rotation);
   const dy = Math.sin(t.rotation);
-  const shift = t.align === 'center' ? -t.width / 2 : t.align === 'right' ? -t.width : 0;
-  const padX = 0.12 * t.fontSize;
-  const u0 = shift + t.width * patch.from - (patch.from > 0 ? padX / 2 : padX);
-  const u1 = shift + t.width + padX;
-  const v0 = -0.34 * t.fontSize;
-  const v1 = 1.0 * t.fontSize;
+  const padX = 0.1 * t.fontSize;
+  const u0 = uFrom - (patch.from > 0 ? padX / 2 : padX);
+  const u1 = uTo + (patch.to < 1 ? padX / 2 : padX);
+  const v0 = -0.24 * t.fontSize;
+  const v1 = 0.92 * t.fontSize;
   const at = (u: number, v: number): Pt => ({ x: t.pos.x + dx * u - dy * v, y: t.pos.y + dy * u + dx * v });
   return [[at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]];
 }
