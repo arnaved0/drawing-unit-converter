@@ -70,7 +70,13 @@ OCR can misread characters, so check converted values against the drawing.
 The **Boxes** controls in the side panel choose what a click on the drawing does:
 
 * **Convert** (default): click a box to convert its value.
-* **+ Add box**: drag a box around a dimension that was missed. On a PDF, the
+* **+ Add box**: drag a box around a dimension that was missed. For a value
+  at an odd angle or squeezed between other things, hold the **right** mouse
+  button and trace around it instead: any shape works. The text is read
+  inside the smallest rectangle around your outline (at its angle), and only
+  what you traced around is read: letters the outline just clips are kept,
+  lines and neighbours that lie mostly outside it are not. Exactly the traced
+  area is whited out when the value is converted. On a PDF, the
   text inside it is read with OCR and shown for you to check or correct
   before it is added; on DXF/DWG you type it. Every number in a box counts as
   a length (angles excepted). A box drawn over a wrongly read value replaces it.
@@ -84,7 +90,8 @@ downloaded PDF). The value is then written again in the box.
 
 Every add and remove can be undone with the **Undo** button in the message
 that appears, or with Ctrl+Z (Cmd+Z). Esc returns to Convert. Right-drag pans
-the drawing in every mode.
+the drawing in Convert and Remove mode; in Add box mode the right button
+traces, and the middle button (or the wheel to zoom) moves around.
 
 ### Custom unit
 
@@ -189,6 +196,17 @@ than a plain `O` in the same place, and only in front of a length (never in
 every Ø was found, with its spacing (`Ø 96.5` stays spaced), and none was
 added to drawings without one. Boxes you draw are read the same way, and the
 box dialog has a **Ø** button for typing it.
+
+### Fractional inches and feet
+
+Values written in fractions and feet-inches are read as one length:
+`3 3/8"`, `3-3/8"`, `3⅜"`, `15/16"`, `1/2 in`, `5'-3 1/2"`, `6'-9"`, `5' 6"`,
+`5 ft 6 in`, and a bare `2 1/4` in a text that is only a dimension (in the
+drawing unit, for example from "All dimensions in inches"). A fraction OCR
+read without its space (`33/8"`) is taken as `3 3/8"`, since drawings never
+write improper fractions. Thread and pipe sizes (`3/4"NPT`, `5/8"-18UNF`,
+`1/4-20 UNC`), dates and codes are left alone. `Ø1 1/4" THRU`, `R 3/4" TYP`
+and `CHAMFER 1/8" x 45°` keep their prefixes and suffixes.
 
 ### Which values count as dimensions
 

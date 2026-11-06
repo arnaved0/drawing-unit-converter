@@ -297,6 +297,29 @@ def sample_shaft():
     c.save()
 
 
+def sample_bracket_inch():
+    """A bracket dimensioned in fractional inches and feet-inches, as US drawings are."""
+    c = canvas.Canvas(os.path.join(OUT, "bracket-inch.pdf"), pagesize=landscape(A3))
+    c.setStrokeColorRGB(*BLACK)
+    c.setLineWidth(0.8)
+    c.rect(250, 300, 420, 180, stroke=1, fill=0)
+    c.rect(670, 300, 120, 60, stroke=1, fill=0)
+    for x in (320, 600):
+        c.circle(x, 430, 12, stroke=1, fill=0)
+    dim_line(c, 250, 300, 670, 300, '5\'-3 1/2"', offset=-30)
+    dim_line(c, 250, 300, 790, 300, '6\'-9"', offset=-60)
+    dim_line(c, 250, 300, 250, 480, '3 3/8"', offset=25)
+    dim_line(c, 790, 300, 790, 360, '15/16"', offset=-20)
+    dim_line(c, 320, 480, 600, 480, "2 1/4", offset=20)
+    leader(c, [(330, 440), (370, 540), (420, 540)])
+    label(c, 425, 537, '2X \u00d81 1/4" THRU')
+    label(c, 700, 420, 'R 3/4" TYP')
+    label(c, 700, 250, '3/4"NPT TAP', color=BLUE)
+    label(c, 860, 260, 'CHAMFER 1/8" x 45\u00b0', rot=-30, color=BLUE)
+    label(c, 250, 200, "All dimensions in inches")
+    c.save()
+
+
 DIMOVR = {"dimtxt": 2.5, "dimasz": 2.5, "dimexe": 1.25, "dimexo": 0.625, "dimlfac": 1, "dimdec": 1}
 
 
@@ -330,7 +353,7 @@ if __name__ == "__main__":
 
     # one sample by name (python scripts/make_samples.py shaft), or all of them
     only = sys.argv[1:]
-    for name, fn in [("defrost", sample_defrost_heater), ("flange", sample_flange_heater), ("arc", sample_arc_element), ("shaft", sample_shaft), ("dxf", sample_dxf)]:
+    for name, fn in [("defrost", sample_defrost_heater), ("flange", sample_flange_heater), ("arc", sample_arc_element), ("shaft", sample_shaft), ("bracket", sample_bracket_inch), ("dxf", sample_dxf)]:
         if not only or name in only:
             fn()
     print("samples written to", os.path.abspath(OUT))

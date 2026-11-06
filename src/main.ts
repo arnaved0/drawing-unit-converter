@@ -2,7 +2,7 @@ import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
-import { addBoxedText, boxPoly, textFromBox, textFromPlacement, type Placement } from './boxes';
+import { addBoxedText, boxPoly, outlineFrame, polyArea, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert } from './geom';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
@@ -581,6 +581,9 @@ let drag: { x: number; y: number; vx: number; vy: number; moved: boolean; id: nu
 /** A box being drawn in "Add box" mode (SVG user coordinates). */
 let pick: { x0: number; y0: number; x1: number; y1: number; id: number } | null = null;
 const selRect = document.getElementById('selection') as unknown as SVGRectElement;
+/** An outline being traced with the right button in "Add box" mode (SVG user coordinates). */
+let trace: { pts: { x: number; y: number }[]; id: number } | null = null;
+const lassoEl = document.getElementById('lasso') as unknown as SVGPolygonElement;
 
 svg.addEventListener('contextmenu', (ev) => ev.preventDefault());
 /** A converted text being moved with its handle. */
@@ -606,7 +609,14 @@ svg.addEventListener('pointerdown', (ev) => {
       return;
     }
   }
-  // right or middle button always pans; left button draws a box in "Add box" mode
+  // In "Add box" mode the right button traces an outline of any shape around a value
+  if (ev.button === 2 && mode === 'add' && state.drawing) {
+    ev.preventDefault();
+    trace = { pts: [clientToSvg(ev.clientX, ev.clientY)], id: ev.pointerId };
+    svg.setPointerCapture(ev.pointerId);
+    return;
+  }
+  // right or middle button pans; left button draws a box in "Add box" mode
   if (ev.button === 0 && mode === 'add' && state.drawing) {
     ev.preventDefault(); // no text selection while drawing a box
     const p = clientToSvg(ev.clientX, ev.clientY);
@@ -630,6 +640,18 @@ svg.addEventListener('pointermove', (ev) => {
     // SVG y is the negated drawing y
     moving.text.offset = { x: moving.from.x + (p.x - moving.x), y: moving.from.y - (p.y - moving.y) };
     renderLayer();
+    return;
+  }
+  if (trace && trace.id === ev.pointerId) {
+    const p = clientToSvg(ev.clientX, ev.clientY);
+    const last = trace.pts[trace.pts.length - 1];
+    const s = Math.max(view.w / (svg.clientWidth || 1), view.h / (svg.clientHeight || 1));
+    // a point every 3 screen pixels is smooth enough
+    if (Math.hypot(p.x - last.x, p.y - last.y) >= 3 * s && trace.pts.length < 2000) {
+      trace.pts.push(p);
+      lassoEl.removeAttribute('hidden');
+      lassoEl.setAttribute('points', trace.pts.map((q) => `${q.x},${q.y}`).join(' '));
+    }
     return;
   }
   if (pick && pick.id === ev.pointerId) {
@@ -669,6 +691,20 @@ svg.addEventListener('pointerup', (ev) => {
     }
     return;
   }
+  if (trace && trace.id === ev.pointerId) {
+    const t = trace;
+    trace = null;
+    lassoEl.setAttribute('hidden', '');
+    // SVG y is the negated drawing y
+    const outline = t.pts.map((q) => ({ x: q.x, y: -q.y }));
+    const s = Math.max(view.w / (svg.clientWidth || 1), view.h / (svg.clientHeight || 1));
+    if (outline.length < 3 || polyArea(outline) < 150 * s * s) {
+      toast('Hold the right button and trace all the way around the dimension (the shape was too small).', false, 4500);
+      return;
+    }
+    void placeBox(outline, outlineFrame(outline));
+    return;
+  }
   if (pick && pick.id === ev.pointerId) {
     const p = pick;
     pick = null;
@@ -688,6 +724,8 @@ svg.addEventListener('pointerup', (ev) => {
   else toggleDimension(target.dataset.dim);
 });
 svg.addEventListener('pointercancel', () => {
+  trace = null;
+  lassoEl.setAttribute('hidden', '');
   moving = null;
   pointer = null;
   updateHandles();
@@ -833,7 +871,7 @@ type Mode = 'convert' | 'add' | 'remove';
 let mode: Mode = 'convert';
 const MODE_HINTS: Record<Mode, string> = {
   convert: 'Click a box to convert its value. Right-drag to pan.',
-  add: 'Drag a box around a dimension that was missed. Its text is read for you to check. Right-drag to pan, Esc to stop.',
+  add: 'Drag a box around a dimension that was missed, or hold the right button and trace around it for any shape. Its text is read for you to check. Middle-drag pans, Esc to stop.',
   remove: 'Click a box to remove it (it was not a dimension, or was read wrongly). Esc to stop.',
 };
 
@@ -920,8 +958,68 @@ function pageStyle(d: Drawing): BoxStyle | undefined {
   return best?.st;
 }
 
+/**
+ * Whites out everything outside a traced outline (image pixels), so only what
+ * the user traced around is read. `grow` pixels around the line are kept, for
+ * letters the trace just touches.
+ */
+function maskOutside(img: ImageData, outline: { x: number; y: number }[], grow: number): void {
+  const m = Object.assign(document.createElement('canvas'), { width: img.width, height: img.height });
+  const c = m.getContext('2d', { willReadFrequently: true })!;
+  c.beginPath();
+  outline.forEach((p, i) => (i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)));
+  c.closePath();
+  c.fillStyle = '#000';
+  c.strokeStyle = '#000';
+  c.lineWidth = 2 * grow;
+  c.lineJoin = 'round';
+  c.fill();
+  c.stroke();
+  const W = img.width;
+  const H = img.height;
+  const alpha = c.getImageData(0, 0, W, H).data;
+  const inside = new Uint8Array(W * H);
+  for (let k = 0; k < W * H; k++) inside[k] = alpha[k * 4 + 3] >= 128 ? 1 : 0;
+  const px = img.data;
+  const dark = (k: number) => Math.min(px[k * 4], px[k * 4 + 1], px[k * 4 + 2]) < 200;
+  // Pieces of ink the outline crosses: a letter it only clips is kept whole;
+  // one that lies more than a quarter outside (a neighbour's letter, a line) goes.
+  const keep = inside.slice();
+  const seen = new Uint8Array(W * H);
+  const stack: number[] = [];
+  for (let s0 = 0; s0 < W * H; s0++) {
+    if (!inside[s0] || seen[s0] || !dark(s0)) continue;
+    const comp: number[] = [];
+    let out = 0;
+    seen[s0] = 1;
+    stack.push(s0);
+    while (stack.length) {
+      const k = stack.pop()!;
+      comp.push(k);
+      if (!inside[k]) out++;
+      const x = k % W;
+      const y = (k - x) / W;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const n = ny * W + nx;
+          if (!seen[n] && dark(n)) {
+            seen[n] = 1;
+            stack.push(n);
+          }
+        }
+      }
+    }
+    const v = out > 0.25 * comp.length ? 0 : 1;
+    for (const k of comp) keep[k] = v;
+  }
+  for (let k = 0; k < W * H; k++) if (!keep[k]) px[k * 4] = px[k * 4 + 1] = px[k * 4 + 2] = 255;
+}
+
 /** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
-async function readBoxText(d: Drawing, poly: Pt[]): Promise<{ text: string; placement: Placement; color: string; style?: BoxStyle } | null> {
+async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<{ text: string; placement: Placement; color: string; style?: BoxStyle } | null> {
   if (!d.pdf) return null;
   const toUser = invert(d.pdf.userToDrawing);
   const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
@@ -957,6 +1055,12 @@ async function readBoxText(d: Drawing, poly: Pt[]): Promise<{ text: string; plac
     const transform = [ex.x, ey.x, ex.y, ey.y, pad - (ex.x * tl.x + ex.y * tl.y), pad - (ey.x * tl.x + ey.y * tl.y)];
     await page.render({ canvasContext: ctx, viewport: vp, canvas, transform } as never).promise;
     const img = ctx.getImageData(0, 0, w, h);
+    if (outline) maskOutside(img, outline.map((p) => {
+      // drawing -> page pixels -> image pixels
+      const u = apply(toUser, p);
+      const [x, y] = vp.convertToViewportPoint(u.x, u.y) as number[];
+      return { x: pad + ex.x * (x - tl.x) + ex.y * (y - tl.y), y: pad + ey.x * (x - tl.x) + ey.y * (y - tl.y) };
+    }), Math.max(2, Math.min(W, H) * 0.04));
     const lines = await recogniseInWorker({ width: w, height: h, data: img.data.slice() }, pxPerMm, pad);
     if (!lines.length) return null;
     // prefer a line that holds a length (or a value in the custom unit), then the most confident one
@@ -1039,15 +1143,20 @@ async function addBox(box: Box): Promise<void> {
   await placeBox(boxPoly(box));
 }
 
-/** Reads the text in a box, asks the user to confirm it and adds it. */
-async function placeBox(poly: Pt[]): Promise<void> {
+/**
+ * Reads the text in a box, asks the user to confirm it and adds it. `poly` is
+ * what is whited out and replaced: a rectangle, or an outline the user traced.
+ * `frame` is the rectangle the text is read in (the traced outline's smallest
+ * rectangle, at its angle); only what lies inside `poly` is read.
+ */
+async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
   const d = state.drawing;
   if (!d) return;
   let read: Awaited<ReturnType<typeof readBoxText>> = null;
   if (d.pdf) {
     busy('Reading the text in the box…');
     try {
-      read = await readBoxText(d, poly);
+      read = await readBoxText(d, frame, frame === poly ? undefined : poly);
     } catch (err) {
       console.warn(err);
     } finally {
@@ -1058,7 +1167,7 @@ async function placeBox(poly: Pt[]): Promise<void> {
   if (typed === null) return;
   // AutoCAD's code for the diameter sign, as some users type it
   const text = typed.replace(/%%c/gi, '\u00d8');
-  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, poly);
+  const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, frame);
   // written like the letters in the box (or, when none were read, like the page's other text)
   Object.assign(t, read?.style ?? pageStyle(d) ?? {});
   if (t.face) t.width = advance(getFace(t.face), text) * t.fontSize * (t.hscale ?? 1);

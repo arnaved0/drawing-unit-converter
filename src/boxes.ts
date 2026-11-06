@@ -48,6 +48,84 @@ export function boxPoly(b: Box): Pt[] {
   ];
 }
 
+/** Area of a polygon (absolute; self-crossing outlines count their loops). */
+export function polyArea(poly: Pt[]): number {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i];
+    const q = poly[(i + 1) % poly.length];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return Math.abs(a) / 2;
+}
+
+function convexHull(pts: Pt[]): Pt[] {
+  const p = [...pts].sort((a, b) => a.x - b.x || a.y - b.y);
+  if (p.length < 3) return p;
+  const cross = (o: Pt, a: Pt, b: Pt) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: Pt[] = [];
+  for (const q of p) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], q) <= 0) lower.pop();
+    lower.push(q);
+  }
+  const upper: Pt[] = [];
+  for (const q of [...p].reverse()) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], q) <= 0) upper.pop();
+    upper.push(q);
+  }
+  return [...lower.slice(0, -1), ...upper.slice(0, -1)];
+}
+
+/**
+ * The smallest rectangle around an outline the user traced, as a box
+ * (bottom-left, bottom-right, top-right, top-left). Its long side is the
+ * reading direction, turned so text reads left to right or bottom to top; a
+ * rectangle within 3° of level or upright is put level or upright.
+ */
+export function outlineFrame(poly: Pt[]): Pt[] {
+  const hull = convexHull(poly);
+  const frameAlong = (u: Pt): { pts: Pt[]; area: number; long: number; short: number } => {
+    const v = { x: -u.y, y: u.x };
+    let u0 = Infinity;
+    let u1 = -Infinity;
+    let v0 = Infinity;
+    let v1 = -Infinity;
+    for (const p of hull) {
+      const a = p.x * u.x + p.y * u.y;
+      const b = p.x * v.x + p.y * v.y;
+      u0 = Math.min(u0, a);
+      u1 = Math.max(u1, a);
+      v0 = Math.min(v0, b);
+      v1 = Math.max(v1, b);
+    }
+    const at = (a: number, b: number): Pt => ({ x: u.x * a + v.x * b, y: u.y * a + v.y * b });
+    return { pts: [at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)], area: (u1 - u0) * (v1 - v0), long: u1 - u0, short: v1 - v0 };
+  };
+  let best: Pt = { x: 1, y: 0 };
+  let bestArea = Infinity;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (!(len > 1e-9)) continue;
+    const u = { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
+    const f = frameAlong(u);
+    if (f.area < bestArea) {
+      bestArea = f.area;
+      best = u;
+    }
+  }
+  // the long side reads; left to right, or bottom to top
+  let f = frameAlong(best);
+  if (f.long < f.short) best = { x: -best.y, y: best.x };
+  let angle = Math.atan2(best.y, best.x);
+  if (angle <= -Math.PI / 2 || angle > Math.PI / 2) angle += angle > 0 ? -Math.PI : Math.PI;
+  const axis = Math.round(angle / (Math.PI / 2)) * (Math.PI / 2);
+  if (Math.abs(angle - axis) < (3 * Math.PI) / 180) angle = axis;
+  f = frameAlong({ x: Math.cos(angle), y: Math.sin(angle) });
+  return f.pts;
+}
+
 /** Angle of a box: direction of its bottom edge (corner 0 to corner 1). */
 export function polyAngle(poly: Pt[]): number {
   return Math.atan2(poly[1].y - poly[0].y, poly[1].x - poly[0].x);

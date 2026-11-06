@@ -110,7 +110,7 @@ text.t { pointer-events: none; }
 .canvas.mode-add { cursor: crosshair; }
 .canvas.mode-remove #overlays polygon.dim { cursor: not-allowed; }
 .canvas.mode-remove #overlays polygon.dim:hover { fill: rgba(196, 40, 40, 0.3); stroke: #c42828; }
-#selection { fill: rgba(31, 107, 173, 0.12); stroke: var(--accent); stroke-width: calc(var(--hair) * 1.5); stroke-dasharray: calc(var(--hair) * 6) calc(var(--hair) * 4); pointer-events: none; }
+#selection, #lasso { fill: rgba(31, 107, 173, 0.12); stroke: var(--accent); stroke-width: calc(var(--hair) * 1.5); stroke-dasharray: calc(var(--hair) * 6) calc(var(--hair) * 4); pointer-events: none; }
 .dim-list .remove { margin-left: 4px; border: none; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 3px; border-radius: 4px; }
 .dim-list .remove:hover { color: #fff; background: #c42828; }
 .dim-list li.manual .orig::after { content: ' (box)'; color: var(--muted); font-size: 11px; }
