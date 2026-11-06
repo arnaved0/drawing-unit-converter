@@ -3,7 +3,8 @@ import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
 import { addBoxedText, boxPoly, outlineFrame, polyArea, textFromBox, textFromPlacement, type Placement } from './boxes';
-import { apply, invert } from './geom';
+import { apply, invert, type Mat } from './geom';
+import { measureInk, pageToImage, renderPageImage } from './ink';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
 import { exportPdfPages, exportPdfPlot } from './export/pdf';
@@ -137,6 +138,23 @@ async function ocrPdf(bytes: Uint8Array, pageIndex: number): Promise<PreprocessR
   }
 }
 
+/** Finds the letters of every text on a PDF page (from the scan's render, or a new one). */
+async function measurePdfInk(d: Drawing, image?: PreprocessResult['image']): Promise<void> {
+  if (!d.pdf) return;
+  if (image) {
+    measureInk(d, { width: image.width, height: image.height, data: image.data, toImage: pageToImage(image.transform as Mat, d.pdf.userToDrawing) });
+    return;
+  }
+  const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
+  try {
+    const doc = await task.promise;
+    const page = await doc.getPage(d.pdf.pageIndex + 1);
+    measureInk(d, await renderPageImage(page as never, d.pdf.userToDrawing, createCanvas));
+  } finally {
+    await task.destroy();
+  }
+}
+
 function download(data: Uint8Array | string, name: string, type: string): void {
   const blob = new Blob([data as BlobPart], { type });
   const a = document.createElement('a');
@@ -244,12 +262,14 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
     let ocrNote = '';
     let pdfBytes = bytes;
     let textStyles: TextStyleHint[] | undefined;
+    let pageImage: PreprocessResult['image'];
     if (ext === 'pdf' && ocrOn()) {
       // Scan & OCR first: text drawn as outlines or scanned becomes real text
       const res = await ocrPdf(bytes, pageIndex);
       pdfBytes = res.bytes;
       docBytes = res.bytes;
       textStyles = res.styles;
+      pageImage = res.image;
       ocrNote = res.added
         ? `Scan & OCR added ${res.added} line${res.added === 1 ? '' : 's'} of text read from the page` +
           (res.alreadyText ? ` (${res.alreadyText} more were already text)` : '') +
@@ -264,6 +284,15 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
     else if (ext === 'dxf') d = importDxf(bytes, file.name);
     else d = await importDwg(bytes, file.name);
     if (ocrNote) d.warnings.unshift(ocrNote);
+    // where each letter is on the page, so a conversion whites out only the letters it replaces
+    if (d.pdf) {
+      busy('Measuring the text…');
+      try {
+        await measurePdfInk(d, pageImage);
+      } catch (err) {
+        console.warn('Could not measure the text; converted values are covered with a band instead.', err);
+      }
+    }
     if (ext === 'pdf') docBytes = pdfBytes;
     state.drawing = d;
     state.file = file;

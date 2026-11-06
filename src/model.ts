@@ -98,6 +98,15 @@ export interface DxfTextSource {
   dimHandle?: string;
 }
 
+/** One letter (or part of one) of a text on the page. */
+export interface InkPiece {
+  /** Extent along the text, measured from its position (as in textCorners). */
+  u0: number;
+  u1: number;
+  /** Outline in drawing coordinates, grown a little for anti-aliasing. */
+  hull: Pt[];
+}
+
 export interface TextEntity extends Base {
   kind: 'text';
   text: string;
@@ -144,6 +153,8 @@ export interface TextEntity extends Base {
   offset?: Pt;
   /** Size of the converted text against the original (1 = same size), set in the dimension list. */
   sizeScale?: number;
+  /** Its letters as found on the page (src/ink.ts): what a conversion whites out. */
+  ink?: InkPiece[];
   dxf?: DxfTextSource;
 }
 

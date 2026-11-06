@@ -198,18 +198,18 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
     const dirU = applyVec(toUser, { x: Math.cos(t.rotation), y: Math.sin(t.rotation) });
     const angle = (Math.atan2(dirU.y, dirU.x) * 180) / Math.PI;
     const color = hexRgb(displayColor(t.style.color));
-    const patch = t.ocr ? ocrPatch(t, list) : null;
+    // only the converted part of the line is whited out and written again
+    const patch = ocrPatch(t, list);
     const safe = fonts.forText(t, patch ? patch.text : lay.text);
 
     if (patch && !safe.lossy) {
-      // OCR / boxed text: cover the old value (and the whole drawn box) and write the new part
+      // white out the old letters (or the whole drawn box) and write the new part
       for (const mask of coverPolygons(t, patch)) polygon(page, mask.map((p) => apply(toUser, p)));
       const sz = sized(t, movedPos(t, patch.pos));
       drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirU, sz.t.fontSize / scale, patch.align, color);
     } else if (!safe.lossy) {
-      // cover the whole original text and write the new line
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
-      polygon(page, textCorners(t, -pad, 1 + pad).map((p) => apply(toUser, p)));
+      for (const mask of coverPolygons(t, { from: -pad, to: 1 + pad })) polygon(page, mask.map((p) => apply(toUser, p)));
       const sz = sized(t, movedPos(t, lay.pos));
       drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirU, sz.t.fontSize / scale, lay.align, color);
     } else {
@@ -219,8 +219,9 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
       for (const dim of list.filter((x) => x.converted)) {
         const from = replaceStart(dim, t.text) / n;
         const to = dim.end / n;
-        // a drawn box: its region, and nothing outside it
-        polygon(page, (t.cover?.length ? t.cover : textCorners(t, from - 0.02, to + 0.02)).map((p) => apply(toUser, p)));
+        // the letters of the value (a drawn box: its region, and nothing outside it)
+        const chars: [number, number] = [[...t.text.slice(0, replaceStart(dim, t.text))].length, [...t.text.slice(0, dim.end)].length];
+        for (const mask of coverPolygons(t, { from: from - 0.02, to: to + 0.02, chars })) polygon(page, mask.map((p) => apply(toUser, p)));
         const startD = textCorners(t, from, to)[0];
         // textCorners()[0] is at the descender line; move up to the baseline
         const base = { x: startD.x - Math.sin(t.rotation) * 0.22 * t.fontSize, y: startD.y + Math.cos(t.rotation) * 0.22 * t.fontSize };

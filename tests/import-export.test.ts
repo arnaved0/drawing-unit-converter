@@ -66,7 +66,8 @@ describe('PDF export', () => {
     const text = await pdfText(bytes);
     expect(text).toContain('3.50 in');
     expect(text).toContain('6.00 in');
-    expect(text).toContain('12.01in Silicone wire leads');
+    // only the value is written again; "Silicone wire leads" stays the original text
+    expect(text).toContain('|12.01in|');
   });
 
   it('keeps CJK neighbours by replacing only the value', async () => {
