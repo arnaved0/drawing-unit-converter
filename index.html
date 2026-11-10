@@ -29,7 +29,7 @@
       <section id="viewer" class="viewer" aria-label="Drawing preview">
         <div id="empty" class="empty">
           <div class="empty-card">
-            <h1>Open an engineering drawing</h1>
+            <h1>Open a drawing</h1>
             <p>Drop a <b>PDF</b>, <b>DXF</b> or <b>DWG</b> file here, or use <b>Open drawing…</b></p>
             <p>Then click any highlighted dimension to convert it to the unit chosen on the right.</p>
             <p class="muted"></p>
@@ -112,14 +112,14 @@
         <section class="grow">
           <details id="dims-panel" open>
             <summary><h2>Dimensions <span id="dim-count" class="count"></span></h2></summary>
-            <p class="hint" id="dim-hint">Open a drawing to list its dimensions.</p>
+            <p class="hint" id="dim-hint"></p>
             <ul id="dim-list" class="dim-list"></ul>
           </details>
         </section>
 
         <section>
           <details id="report">
-            <summary>What was found in the file</summary>
+            <summary>Elements</summary>
             <dl id="stats" class="stats"></dl>
             <ul id="warnings" class="warnings"></ul>
           </details>
