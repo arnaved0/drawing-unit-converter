@@ -6,6 +6,8 @@ click a dimension to convert it to another unit, then download the result as
 
 **Live app:** https://arnaved0.github.io/drawing-unit-converter/
 
+**New here? Read the one-page [quick guide](MANUAL.md).**
+
 ## How to use
 
 1. Click **Open drawing…** or drop a file on the page.
