@@ -62,6 +62,14 @@ export class PageBackground {
     return !!this.base;
   }
 
+  /** The whole-page picture's pixels and where they lie (pixels -> drawing), for the layout. */
+  pixels(): { data: Uint8ClampedArray; width: number; height: number; toDrawing: Mat } | null {
+    const src = this.base?.source as HTMLCanvasElement | undefined;
+    if (!src || !this.base) return null;
+    const img = src.getContext('2d')!.getImageData(0, 0, src.width, src.height);
+    return { data: img.data, width: img.width, height: img.height, toDrawing: this.base.toDrawing };
+  }
+
   /**
    * Shows a PDF page. `userToDrawing` maps PDF user space to drawing
    * coordinates. Resolves once the whole-page picture is ready.

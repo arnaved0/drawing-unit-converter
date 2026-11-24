@@ -34,7 +34,7 @@ import { displayColor } from '../aci';
 import { replaceStart, type Dimension } from '../dimensions';
 import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAngle, textCorners, type Mat } from '../geom';
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
-import { coverPolygons, layoutText, movedPos, ocrPatch, sized } from '../render/svg';
+import { alignPatch, coverPolygons, layoutText, movedPos, ocrPatch, sized } from '../render/svg';
 import { faceChar, getFace, type FaceId } from '../fonts/faces';
 import { outlineText, scriptOf, type Script, type ScriptFontLoader, type ShapingFont } from '../fonts/script';
 
@@ -251,7 +251,8 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[],
     // a PDF's colours are paper colours: white text stays white
     const color = hexRgb(t.style.color);
     // only the converted part of the line is whited out and written again
-    const patch = ocrPatch(t, list);
+    const p0 = ocrPatch(t, list);
+    const patch = p0 && alignPatch(t, p0, coverPolygons(t, p0));
     const safe = fonts.forText(t, patch ? patch.text : lay.text);
     const scriptFont = safe.lossy ? scripts.get(scriptOf(patch ? patch.text : lay.text, langOf(list)) as Script) : null;
 

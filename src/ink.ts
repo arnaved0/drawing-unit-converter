@@ -365,11 +365,36 @@ export function inkBetween(t: TextEntity, uFrom: number, uTo: number, chars?: [n
     };
     a = chars[0] <= Math.max(0, first) ? -Infinity : snap(map(cellEdge(t, chars[0])));
     b = chars[1] > last ? Infinity : snap(map(cellEdge(t, chars[1])));
-    const hit = core.filter((p) => mid(p) > a && mid(p) < b);
+    let hit = core.filter((p) => mid(p) > a && mid(p) < b);
+    // The white-out should be about as long as the value it replaces. When the
+    // estimate left its first letter out (it is noticeably shorter), the
+    // letter just before the cut belongs to the value too ("ID>=8mm": the "8").
+    const expect = (fit ? k : 1) * (cellEdge(t, chars[1]) - cellEdge(t, chars[0]));
+    if (hit.length && Number.isFinite(a) && expect > 0) {
+      const before = core.filter((p) => mid(p) <= a).sort((x, y) => y.u1 - x.u1);
+      let lo = Math.min(...hit.map((p) => p.u0));
+      const hi = Math.max(...hit.map((p) => p.u1));
+      for (const p of before) {
+        if (hi - lo >= 0.8 * expect) break;
+        // a whole letter, right next to the value, that brings the length closer to it
+        if (lo - p.u1 > 0.35 * em || p.u1 - p.u0 > 0.8 * em || hi - p.u0 > 1.15 * expect) break;
+        hit = [p, ...hit];
+        lo = p.u0;
+      }
+    }
     // a letter that an arrowhead touches is one piece with it: keep the white-out within the text
     const lo = E0 - 0.12 * em;
     const hi = E1 + 0.12 * em;
-    return hit.length ? hit.map((p) => (p.onLine && (p.u0 < lo || p.u1 > hi) ? clipAlong(t, p.hull, lo, hi) : p.hull)).filter((h) => h.length >= 3) : null;
+    const out = hit.map((p) => (p.onLine && (p.u0 < lo || p.u1 > hi) ? clipAlong(t, p.hull, lo, hi) : p.hull));
+    // letters run together across the cut ("=8" printed touching): the part inside the value goes too
+    if (hit.length && Number.isFinite(a)) {
+      const start = Math.min(...hit.map((p) => p.u0));
+      for (const p of core) {
+        if (hit.includes(p) || !(p.u0 < a && p.u1 > a + 0.25 * em)) continue;
+        out.push(clipAlong(t, p.hull, Math.min(a, start) - 0.02 * em, Number.isFinite(b) ? b : p.u1 + em));
+      }
+    }
+    return hit.length ? out.filter((h) => h.length >= 3) : null;
   }
   const slack = 0.06 * em;
   const hit = t.ink.filter((p) => mid(p) >= a - slack && mid(p) <= b + slack);

@@ -23,7 +23,7 @@ Every dimension found is highlighted in blue and listed under **Dimensions**.
 - **Click a dimension** (on the drawing or in the list) to convert it. Click it again to undo.
 - **Convert all** converts everything; **Reset all** undoes everything.
 
-Converted values turn green.
+Converted values turn green. They are placed neatly for you: when a new value is longer than the old one, it is moved a little or made slightly smaller so it does not run into lines, arrows or other text. (You can turn this off in **Settings**. A value you move or resize yourself is never moved again.)
 
 ## 4. Fix anything that was missed
 Click **+ Add box**, then drag a box around the value or text. The tool reads what is inside (any language, including Chinese and Japanese) and shows it to you. Correct it if needed, then choose:

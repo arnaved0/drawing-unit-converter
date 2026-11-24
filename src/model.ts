@@ -157,6 +157,11 @@ export interface TextEntity extends Base {
   offset?: Pt;
   /** Size of the converted text against the original (1 = same size), set in the dimension list. */
   sizeScale?: number;
+  /**
+   * Who placed the converted text where it is: "user" (moved, sized or turned
+   * by hand: the automatic layout leaves it alone) or "auto" (the layout).
+   */
+  placedBy?: 'user' | 'auto';
   /** Extra turn of the converted text (radians, counter-clockwise, about its middle), set in the dimension list. */
   turn?: number;
   /** Its letters as found on the page (src/ink.ts): what a conversion whites out. */

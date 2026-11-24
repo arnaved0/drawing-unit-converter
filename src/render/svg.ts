@@ -370,7 +370,7 @@ export function handlePoint(t: TextEntity, drawn: { text: string; pos: Pt; align
 }
 
 /** Corners of a line of text written like `t` at `pos`. */
-function drawnCorners(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): Pt[] {
+export function drawnCorners(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEntity['align'] }): Pt[] {
   const w = textAdvance(t, drawn.text);
   const u0 = drawn.align === 'center' ? -w / 2 : drawn.align === 'right' ? -w : 0;
   const dx = Math.cos(t.rotation);
@@ -400,6 +400,43 @@ function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEnt
 
 /** Dynamic part: texts that hold dimensions, plus the clickable highlight boxes. */
 /**
+ * Where a text's converted value is written before the user (or the layout)
+ * moves it: the new text, its anchor, and the white-outs over the original.
+ * `whole` is true when the whole text is written again (it can be moved);
+ * false for a value inside a longer line (it stays in the line).
+ */
+/**
+ * A value inside a longer line is written where the old value's letters
+ * started (the left end of its white-out), not where the font says they
+ * should be: the two often differ a little, and the new value would then
+ * touch the character before it.
+ */
+export function alignPatch(t: TextEntity, patch: OcrPatch, masks: Pt[][]): OcrPatch {
+  if (patch.from <= 0 || !masks.length || t.cover?.length) return patch;
+  const dx = Math.cos(t.rotation);
+  const dy = Math.sin(t.rotation);
+  const uOf = (p: Pt) => (p.x - t.pos.x) * dx + (p.y - t.pos.y) * dy;
+  const u0 = Math.min(...masks.flat().map(uOf)) + 0.04 * t.fontSize;
+  const cur = uOf(patch.pos);
+  if (!(Math.abs(u0 - cur) < 0.8 * t.fontSize)) return patch;
+  return { ...patch, pos: { x: patch.pos.x + dx * (u0 - cur), y: patch.pos.y + dy * (u0 - cur) } };
+}
+
+export function basePlacement(e: TextEntity, list: Dimension[], pageShown: boolean): { text: string; pos: Pt; align: TextEntity['align']; whole: boolean; masks: Pt[][] } | null {
+  if (e.ocr || pageShown) {
+    const p0 = ocrPatch(e, list);
+    if (!p0) return null;
+    const masks = coverPolygons(e, p0);
+    const patch = alignPatch(e, p0, masks);
+    return { text: patch.text, pos: patch.pos, align: patch.align, whole: patch.from <= 0 && patch.to >= 1, masks };
+  }
+  const lay = layoutText(e, list);
+  if (!lay.display.changed) return null;
+  // a CAD text is written again whole (the original is not drawn): all of it can move
+  return { text: lay.text, pos: lay.pos, align: lay.align, whole: true, masks: [] };
+}
+
+/**
  * `pageShown`: the page is drawn as rendered (a PDF or an image), so every
  * original text stays on screen and a converted value is written over a white
  * patch, whatever kind of text it was (real text, outlines or pixels).
@@ -423,10 +460,12 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
     let drawn: { text: string; pos: Pt; align: TextEntity['align'] } | null = null;
     const area: Pt[] = [];
     if (e.ocr || pageShown) {
-      const patch = ocrPatch(e, list);
+      const p0 = ocrPatch(e, list);
+      const masks = p0 ? coverPolygons(e, p0) : [];
+      const patch = p0 && alignPatch(e, p0, masks);
       if (patch) {
         // the white-out stays over the original; only the new text moves
-        for (const mask of coverPolygons(e, patch)) {
+        for (const mask of masks) {
           area.push(...mask);
           texts.push(`<polygon class="mask" points="${mask.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}"/>`);
         }

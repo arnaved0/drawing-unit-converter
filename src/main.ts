@@ -15,6 +15,7 @@ import { IMAGE_EXTENSIONS, imageToPdf, pdfToImage } from './importers/image';
 import type { Box, Drawing, Entity, LengthUnit, Pt, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
 import { PageBackground } from './render/page';
+import { arrange, inkMapFromRGBA, type InkMap } from './layout/arrange';
 import { matchFonts, normaliseOcrText, placeFit, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, type Face } from './fonts/faces';
 import { canvasRenderer } from './fonts/match';
@@ -559,6 +560,7 @@ function setTurn(id: string, deg: number | null, step = 0): void {
   v = ((((v + 180) % 360) + 360) % 360) - 180; // -180 .. 179
   snapshot();
   t.turn = v ? (v * Math.PI) / 180 : undefined;
+  t.placedBy = 'user';
   if (!d.converted) convert(d, state.settings);
   renderDynamic();
 }
@@ -578,6 +580,7 @@ function stepSize(id: string, dir: 1 | -1): void {
   const next = Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(((t.sizeScale ?? 1) + dir * 0.1) * 10) / 10));
   snapshot();
   t.sizeScale = next === 1 ? undefined : next;
+  t.placedBy = 'user';
   if (!d.converted) convert(d, state.settings);
   renderDynamic();
 }
@@ -593,6 +596,8 @@ function editDimension(id: string, change: (o: NonNullable<Dimension['override']
   d.override = Object.keys(o).length ? o : undefined;
   convert(d, state.used.get(d.id) ?? state.settings);
   renderDynamic();
+  // a longer or shorter value may need another place
+  void autoArrange(new Set([t.id])).then((n) => n && renderDynamic());
 }
 
 $('dim-list').addEventListener('change', (ev) => {
@@ -778,6 +783,7 @@ svg.addEventListener('pointermove', (ev) => {
     }
     // SVG y is the negated drawing y
     moving.text.offset = { x: moving.from.x + (p.x - moving.x), y: moving.from.y - (p.y - moving.y) };
+    moving.text.placedBy = 'user';
     renderLayer();
     return;
   }
@@ -919,6 +925,118 @@ function addCustomDimensions(): void {
   state.dims.sort((a, b) => (a.textId === b.textId ? a.start - b.start : 0));
 }
 
+// ------------------------------------------------------------------ automatic layout
+
+const ARRANGE_KEY = 'duc.arrange.v1';
+const arrangeOn = () => localStorage.getItem(ARRANGE_KEY) !== 'off';
+/** Pictures of each drawing's ink, made once (the drawing itself does not change). */
+const inkMaps = new WeakMap<Drawing, Map<string, InkMap>>();
+
+/** A CAD drawing's shapes in `region`, drawn at `scale` pixels per unit (values left out: they are what is placed). */
+async function drawCadRegion(region: Box, scale: number): Promise<InkMap> {
+  const w = region.maxX - region.minX;
+  const h = region.maxY - region.minY;
+  const W = Math.max(1, Math.round(w * scale));
+  const H = Math.max(1, Math.round(h * scale));
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  for (const sel of ['#overlays', '#dimtexts', '#selection', '#lasso']) clone.querySelector(sel)?.remove();
+  clone.removeAttribute('hidden');
+  const u = 1 / scale;
+  clone.setAttribute('viewBox', `${region.minX} ${-region.maxY} ${w} ${h}`);
+  clone.setAttribute('width', String(W));
+  clone.setAttribute('height', String(H));
+  clone.setAttribute('style', `--hair:${u}px;--hairn:${u}`);
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' }));
+  try {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error('The drawing could not be drawn for the layout.'));
+      img.src = url;
+    });
+    const c = Object.assign(document.createElement('canvas'), { width: W, height: H });
+    const ctx = c.getContext('2d', { willReadFrequently: true })!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(img, 0, 0, W, H);
+    // drawing -> pixels: x from the region's left, y down from its top
+    const toGrid: Mat = [scale, 0, 0, -scale, -region.minX * scale, region.maxY * scale];
+    return inkMapFromRGBA(ctx.getImageData(0, 0, W, H).data, W, H, toGrid);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * Places converted values neatly (see layout/arrange.ts): all of them, or the
+ * values of the texts in `only`. Values the user moved, sized or turned stay.
+ */
+async function autoArrange(only?: Set<string>): Promise<number> {
+  const d = state.drawing;
+  if (!d || !arrangeOn()) return 0;
+  try {
+    let cache = inkMaps.get(d);
+    if (!cache) inkMaps.set(d, (cache = new Map()));
+    if (pageBg.active) {
+      // the page as rendered (PDF, picture): text may go anywhere on the sheet
+      let map = cache.get('page');
+      if (!map) {
+        const px = pageBg.pixels();
+        if (!px) return 0;
+        map = inkMapFromRGBA(px.data, px.width, px.height, invert(px.toDrawing));
+        cache.set('page', map);
+      }
+      const inv = invert(map.toGrid);
+      const c0 = apply(inv, { x: 0, y: 0 });
+      const c1 = apply(inv, { x: map.width, y: map.height });
+      const bounds = { minX: Math.min(c0.x, c1.x), maxX: Math.max(c0.x, c1.x), minY: Math.min(c0.y, c1.y), maxY: Math.max(c0.y, c1.y) };
+      return arrange(d, state.dims, map, { pageShown: true, bounds, only });
+    }
+    // A CAD drawing can be far larger than its text: it is drawn in tiles, each
+    // fine enough to see the lines around the values (about 8 pixels per letter height).
+    const texts = d.entities.filter((e): e is TextEntity => e.kind === 'text' && state.dims.some((x) => x.textId === e.id && x.converted) && (!only || only.has(e.id)));
+    if (!texts.length) return 0;
+    const sizes = texts.map((t) => t.fontSize).sort((p, q) => p - q);
+    const em = sizes[Math.floor(sizes.length / 2)];
+    const scale = 8 / em;
+    const tile = 1600 / scale; // drawing units per tile, before its margin
+    const margin = 8 * em; // room to move into, all round
+    const groups = new Map<string, TextEntity[]>();
+    for (const t of texts) {
+      const key = `${Math.floor(t.pos.x / tile)},${Math.floor(t.pos.y / tile)}`;
+      const l = groups.get(key) ?? [];
+      l.push(t);
+      groups.set(key, l);
+    }
+    const b = d.bounds;
+    const sheet = { minX: b.minX - margin, maxX: b.maxX + margin, minY: b.minY - margin, maxY: b.maxY + margin };
+    let changed = 0;
+    for (const [key, group] of groups) {
+      const [i, j] = key.split(',').map(Number);
+      const region = { minX: i * tile - margin, maxX: (i + 1) * tile + margin, minY: j * tile - margin, maxY: (j + 1) * tile + margin };
+      let map = cache.get(key);
+      if (!map) cache.set(key, (map = await drawCadRegion(region, scale)));
+      if (state.drawing !== d) return changed;
+      // values stay within this tile's picture and the drawing
+      const bounds = { minX: Math.max(region.minX, sheet.minX), maxX: Math.min(region.maxX, sheet.maxX), minY: Math.max(region.minY, sheet.minY), maxY: Math.min(region.maxY, sheet.maxY) };
+      changed += arrange(d, state.dims, map, { pageShown: false, bounds, only: new Set(group.map((t) => t.id)) });
+    }
+    return changed;
+  } catch (err) {
+    console.warn('Automatic layout failed; values stay where they were.', err);
+    return 0;
+  }
+}
+
+/** A text whose values are all back to the original: the layout's placement goes too. */
+function clearAutoPlacement(textId: string): void {
+  const t = textOf(textId);
+  if (!t || t.placedBy !== 'auto' || state.dims.some((x) => x.textId === textId && x.converted)) return;
+  t.offset = undefined;
+  t.sizeScale = undefined;
+  t.placedBy = undefined;
+}
+
 function toggleDimension(id: string): void {
   const d = state.dims.find((x) => x.id === id);
   if (!d) return;
@@ -926,9 +1044,15 @@ function toggleDimension(id: string): void {
   if (d.converted && d.converted.key === key) {
     d.converted = undefined;
     state.used.delete(d.id);
+    clearAutoPlacement(d.textId);
   } else if (!convert(d, state.settings)) {
     const why = customSkipReason();
     toast(why.startsWith('Enter') ? why : `"${d.original}" was left as it is: ${why}.`, true, 6000);
+    return;
+  } else {
+    // placed neatly once the layout has looked at it
+    renderDynamic();
+    void autoArrange(new Set([d.textId])).then((n) => n && renderDynamic());
     return;
   }
   renderDynamic();
@@ -972,6 +1096,7 @@ $('dim-list').addEventListener('click', (ev) => {
     if (t) {
       snapshot();
       t.offset = undefined;
+      t.placedBy = t.sizeScale || t.turn ? 'user' : undefined;
       renderDynamic();
     }
     return;
@@ -1005,6 +1130,8 @@ $('dim-list').addEventListener('click', (ev) => {
       if (t) {
         t.sizeScale = undefined;
         t.turn = undefined;
+        t.offset = undefined;
+        t.placedBy = undefined;
       }
     });
     return;
@@ -1050,14 +1177,14 @@ interface Snapshot {
   dims: Dimension[];
   used: Map<string, ConversionSettings>;
   /** Where converted texts had been moved to, and their size. */
-  offsets: Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined; turn: number | undefined }>;
+  offsets: Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined; turn: number | undefined; placedBy: TextEntity['placedBy'] }>;
 }
 const undoStack: Snapshot[] = [];
 function snapshot(): void {
   const d = state.drawing;
   if (!d) return;
-  const offsets = new Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined; turn: number | undefined }>();
-  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, { offset: e.offset, sizeScale: e.sizeScale, turn: e.turn });
+  const offsets = new Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined; turn: number | undefined; placedBy: TextEntity['placedBy'] }>();
+  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, { offset: e.offset, sizeScale: e.sizeScale, turn: e.turn, placedBy: e.placedBy });
   undoStack.push({ entities: [...d.entities], dims: state.dims.map((x) => ({ ...x })), used: new Map(state.used), offsets });
   if (undoStack.length > 50) undoStack.shift();
 }
@@ -1069,6 +1196,7 @@ function undo(): void {
     t.offset = o.offset;
     t.sizeScale = o.sizeScale;
     t.turn = o.turn;
+    t.placedBy = o.placedBy;
   }
   d.entities = s.entities;
   state.dims = s.dims;
@@ -1707,6 +1835,8 @@ function placeTranslation(d: Drawing, poly: Pt[], frame: Pt[], read: BoxRead | n
     const placed = edit.entities.find((e): e is TextEntity => e.kind === 'text' && e.id === t.id);
     const need = advanceOf(t, line);
     if (placed && need > room * 1.02) placed.sizeScale = Math.max(0.3, Math.floor((room / need) * 20) / 20);
+    // written to fit its box: the layout leaves it there
+    if (placed) placed.placedBy = 'user';
     d.entities = edit.entities;
     state.dims = [...edit.dims.filter((x) => x.textId !== t.id), dim];
     for (const id of edit.replaced) state.used.delete(id);
@@ -1748,10 +1878,18 @@ window.addEventListener('keydown', (ev) => {
   }
 });
 
-$('convert-all').addEventListener('click', () => {
+$('convert-all').addEventListener('click', async () => {
   let skipped = 0;
+  snapshot();
   for (const d of state.dims) if (!convert(d, state.settings)) skipped++;
   renderDynamic();
+  if (arrangeOn()) {
+    busy('Arranging the new values…');
+    const moved = await autoArrange();
+    busy(null);
+    renderDynamic();
+    if (moved && !skipped) toast(`${moved} value${moved === 1 ? ' was' : 's were'} moved or made a little smaller to keep clear of the drawing.`, false, 6000, { label: 'Undo', run: undo });
+  }
   if (skipped) {
     const why = customSkipReason();
     toast(why.startsWith('Enter') ? why : `${skipped} value${skipped === 1 ? ' was' : 's were'} left as ${skipped === 1 ? 'it is' : 'they are'}: ${why}.`, true, 6000);
@@ -1760,6 +1898,7 @@ $('convert-all').addEventListener('click', () => {
 $('reset-all').addEventListener('click', () => {
   for (const d of state.dims) d.converted = undefined;
   state.used.clear();
+  for (const d of state.dims) clearAutoPlacement(d.textId);
   renderDynamic();
 });
 
@@ -1860,6 +1999,9 @@ $('ocr-again').addEventListener('click', () => {
   if (state.file) void openFile(state.file, state.drawing?.pdf?.pageIndex ?? 0, true);
 });
 
+$<HTMLInputElement>('auto-arrange').checked = arrangeOn();
+$('auto-arrange').addEventListener('change', () => localStorage.setItem(ARRANGE_KEY, $<HTMLInputElement>('auto-arrange').checked ? 'on' : 'off'));
+
 $<HTMLInputElement>('highlight').addEventListener('change', (ev) => {
   state.highlight = (ev.target as HTMLInputElement).checked;
   renderDynamic();
@@ -1882,7 +2024,7 @@ $('export-dxf').addEventListener('click', () => {
   const d = state.drawing;
   if (!d) return;
   const moved = d.entities.some((e) => e.kind === 'text' && (!!e.offset || (e.sizeScale ?? 1) !== 1 || !!e.turn));
-  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was moved, resized or turned, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
+  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was arranged, moved, resized or turned, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
   else if (d.source !== 'pdf' && d.dxf?.hasHandles) {
     try {
       download(patchDxf(d, state.dims), `${baseName()}-converted.dxf`, 'application/dxf');
