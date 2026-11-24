@@ -113,7 +113,7 @@ const DEGREE_RE = /^\s?(\u00b0|\u00ba|%%d|deg\b)/i;
  * Diameter signs: Ø, ⌀, ∅, φ, Φ, ø and AutoCAD's %%c; after one, a fit class ("Ø30 H7").
  */
 const STANDALONE_RE =
-  /^(?:\s|S?R\b|S?R(?=\s|=|$)|\u00d8|\u00f8|\u2300|\u2205|\u03c6|\u03a6|%%c|DIA\.?|D(?=\s|=|:)|=|:|\uff1a|\(|\)|\[|\]|<|>|\u2264|\u2265|\u00b1|~|\u2248|X\s?\d+|\d+\s?X|\d+\s?PL(?:CS)?\.?|TYP\.?|REF\.?|MAX\.?|MIN\.?|THRU|EQ\.?\s?SP\.?|DEEP|(?<=[\u00d8\u2300\u2205\u03c6\u03a6]\s?\d*\s?)[A-HJKMNP-Za-hjkmnp-z]{1,2}\d{1,2}(?:\/[A-HJKMNP-Za-hjkmnp-z]{1,2}\d{1,2})?)*$/i;
+  /^(?:\s|S?R\b|S?R(?=\s|=|$)|\u00d8|\u00f8|\u2300|\u2205|\u03c6|\u03a6|%%c|DIA\.?|D(?=\s|=|:)|=|:|\uff1a|\(|\)|\[|\]|<|>|\u2264|\u2265|\u00b1|~|\u2248|[X\u00d7]\s?\d+|\d+\s?[X\u00d7]|\d+\s?PL(?:CS)?\.?|TYP\.?|REF\.?|MAX\.?|MIN\.?|THRU|EQ\.?\s?SP\.?|DEEP|(?<=[\u00d8\u2300\u2205\u03c6\u03a6]\s?\d*\s?)[A-HJKMNP-Za-hjkmnp-z]{1,2}\d{1,2}(?:\/[A-HJKMNP-Za-hjkmnp-z]{1,2}\d{1,2})?)*$/i;
 
 function kindFromPrefix(before: string): DimKind {
   const tail = before.slice(-8);
@@ -265,6 +265,8 @@ function scan(text: string, customSuffix?: string): Candidate[] {
       rest = text.slice(end);
     }
     if (DEGREE_RE.test(rest)) continue;
+    // a count of features: "12×∅6" (12 holes of ∅6), "2×5/16-28" (2 threaded holes)
+    if (unit === null && !suffix && /^\s?[xX\u00d7]\s?(?:[\u00d8\u00f8\u2300\u2205\u03c6\u03a6]|%%c|R\s?\d|M\d|\d+\s?\/\s?\d+\s?-\s?\d)/i.test(rest)) continue;
     // the custom suffix with a prefix ("3.5 kV" when the unit is V) is another unit
     if (!suffix && own && new RegExp(`^\\s?[A-Za-z\u00b5]{1,2}${escRe(customSuffix!.trim())}(?![A-Za-z])`, 'i').test(rest)) continue;
     if (unit === null && !suffix) {
@@ -337,6 +339,10 @@ export function findLengthTokens(text: string, ctx: TokenContext = {}): LengthTo
  */
 export function manualTokens(text: string, customSuffix?: string): LengthToken[] {
   const toks = findLengthTokens(text, { isDimension: true, customSuffix });
+  // A clear dimension in the box (a unit, Ø, R): numbers written onto a word
+  // next to it are a count or a grade ("数量：12个", "304不锈钢"), not lengths.
+  const strong = toks.filter(isClearDimension);
+  if (strong.length) return toks.filter((t) => strong.includes(t) || !/^\s?\p{L}/u.test(text.slice(t.end)));
   if (toks.length) return toks;
   const out: LengthToken[] = [];
   const re = /(\d+(?:[.,]\d+)?|\.\d+)(\s?)([A-Za-z\u00b5\u00b0"'\u2033\u2032%]{1,6})?/g;
@@ -359,6 +365,17 @@ export function manualTokens(text: string, customSuffix?: string): LengthToken[]
     if (!word && m[2]) re.lastIndex -= m[2].length; // the space belongs to what follows
   }
   return out;
+}
+
+/** A value that is clearly a dimension: written with a unit, or as a diameter or radius. */
+export function isClearDimension(t: LengthToken): boolean {
+  return t.unit !== null || t.suffix !== undefined || t.kind !== 'linear';
+}
+
+/** How clearly a line of a box holds a dimension: 2 clearly, 1 a number, 0 none. */
+export function valueRank(text: string, customSuffix?: string): number {
+  const toks = manualTokens(text, customSuffix);
+  return toks.some(isClearDimension) ? 2 : toks.length ? 1 : 0;
 }
 
 /** True when the text holds nothing but dimension values (it is then re-centred when it grows). */

@@ -1,7 +1,7 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, manualTokens, replacementText, settingsFor, type Dimension } from './dimensions';
+import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, manualTokens, replacementText, settingsFor, valueRank, type Dimension } from './dimensions';
 import { addBoxedText, boxPoly, outlineFrame, polyArea, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert, pointInPoly, textCorners, type Mat } from './geom';
 import { measureInk, pageToImage, renderPageImage } from './ink';
@@ -1212,7 +1212,8 @@ function readFileText(d: Drawing, poly: Pt[]): BoxRead | null {
   const first = found[0];
   const allText = found.map((t) => t.text).join('\n');
   const suffix = customSuffix();
-  const best = found.find((t) => findLengthTokens(t.text, { isDimension: true, customSuffix: suffix }).length) ?? first;
+  // the line that most clearly holds a dimension
+  const best = [...found].sort((a, b) => valueRank(b.text, suffix) - valueRank(a.text, suffix))[0] ?? first;
   const dir = { x: Math.cos(best.rotation), y: Math.sin(best.rotation) };
   const shift = best.align === 'center' ? -best.width / 2 : best.align === 'right' ? -best.width : 0;
   return {
@@ -1251,7 +1252,16 @@ function distinctLines(lines: FoundLine[]): FoundLine[] {
  */
 async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRead | null> {
   const fromFile = readFileText(d, outline ?? poly);
-  if (!d.pdf) return fromFile;
+  if (!d.pdf) {
+    // a DXF or DWG: its own text, or (text exploded into lines) what the drawn shapes read as
+    if (fromFile && usableText(fromFile.allText)) return fromFile;
+    try {
+      return (await ocrDrawnRegion(d, outline ?? poly)) ?? fromFile;
+    } catch (err) {
+      console.warn(err);
+      return fromFile;
+    }
+  }
   let ocr: BoxRead | null = null;
   try {
     ocr = await ocrBoxText(d, poly, outline);
@@ -1273,6 +1283,72 @@ async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxR
 
 /** Chinese, Japanese and Korean characters. */
 const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]/;
+
+/**
+ * OCR of a region of a CAD drawing as it is drawn on screen (text exploded
+ * into lines and arcs, or in a font the file does not name). The SVG of the
+ * region is drawn into a picture and read like a scan.
+ */
+async function ocrDrawnRegion(d: Drawing, poly: Pt[]): Promise<BoxRead | null> {
+  const xs = poly.map((p) => p.x);
+  const ys = poly.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const w = maxX - minX;
+  const h = maxY - minY;
+  if (!(w > 0 && h > 0)) return null;
+  // about 48 px for the short side's worth of text, at most 2400 px across
+  const scale = Math.min(2400 / Math.max(w, h), Math.max(8, 120 / Math.min(w, h)));
+  const pad = 16;
+  const W = Math.round(w * scale) + 2 * pad;
+  const H = Math.round(h * scale) + 2 * pad;
+  const clone = svg.cloneNode(true) as SVGSVGElement;
+  clone.querySelector('#overlays')?.remove();
+  clone.querySelector('#selection')?.remove();
+  clone.querySelector('#lasso')?.remove();
+  clone.removeAttribute('hidden');
+  const u = 1 / scale; // drawing units per pixel
+  clone.setAttribute('viewBox', `${minX - pad * u} ${-maxY - pad * u} ${W * u} ${H * u}`);
+  clone.setAttribute('width', String(W));
+  clone.setAttribute('height', String(H));
+  clone.setAttribute('style', `--hair:${u}px;--hairn:${u};background:#fff`);
+  const st = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  st.textContent = 'polygon.mask{fill:#fff;stroke:none}.handle{display:none}text{white-space:pre}';
+  clone.insertBefore(st, clone.firstChild);
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(clone)], { type: 'image/svg+xml' }));
+  try {
+    const img = new Image();
+    await new Promise<void>((res, rej) => {
+      img.onload = () => res();
+      img.onerror = () => rej(new Error('The drawing could not be drawn for reading.'));
+      img.src = url;
+    });
+    const c = Object.assign(document.createElement('canvas'), { width: W, height: H });
+    const ctx = c.getContext('2d', { willReadFrequently: true })!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.drawImage(img, 0, 0, W, H);
+    const data = ctx.getImageData(0, 0, W, H);
+    const lines = await recogniseInWorker({ width: W, height: H, data: data.data.slice() }, scale, pad);
+    if (!lines.length) return null;
+    const suffix = customSuffix();
+    const best = [...lines].sort((a, b) => valueRank(b.text, suffix) - valueRank(a.text, suffix) || b.confidence - a.confidence)[0];
+    const map = (x: number, y: number): [number, number] => [minX + (x - pad) * u, maxY - (y - pad) * u];
+    const pl = placeLine(best, map);
+    const allText = distinctLines(lines).map((l) => normaliseOcrText(l.text) ?? l.text.trim()).filter(Boolean).join('\n');
+    return {
+      text: normaliseOcrText(best.text) ?? best.text.trim(),
+      allText: allText || best.text,
+      placement: { origin: { x: pl.origin[0], y: pl.origin[1] }, across: { x: pl.across[0], y: pl.across[1] }, up: { x: pl.up[0], y: pl.up[1] } },
+      color: '#' + best.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join(''),
+      style: pageStyle(d),
+    };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 
 /** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
 async function ocrBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRead | null> {
@@ -1365,7 +1441,7 @@ async function ocrBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRe
   }
 }
 
-type BoxAnswer = { action: 'convert'; text: string } | { action: 'translate'; source: string; translation: string; lang: string };
+type BoxAnswer = { action: 'convert'; text: string; partial: boolean } | { action: 'translate'; source: string; translation: string; lang: string };
 
 const TR_TO_KEY = 'duc.translate.to.v1';
 {
@@ -1378,8 +1454,10 @@ const TR_TO_KEY = 'duc.translate.to.v1';
 /** The lines of `text` that hold a value to convert, on one line (all of it when none do). */
 function valueLines(text: string): string {
   const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
-  const withValues = lines.filter((l) => manualTokens(l, customSuffix()).length);
-  return (withValues.length ? withValues : lines).join(' ');
+  // the lines that most clearly hold a dimension ("电热管直径Ø12" before "数量：12个")
+  const rank = lines.map((l) => valueRank(l, customSuffix()));
+  const top = Math.max(0, ...rank);
+  return (top ? lines.filter((_, i) => rank[i] === top) : lines).join(' ');
 }
 
 /**
@@ -1501,7 +1579,11 @@ function askBoxText(read: BoxRead | null): Promise<BoxAnswer | null> {
       const text = input.value.trim();
       if (dlg.returnValue === 'translation' && out.value.trim()) {
         resolve({ action: 'translate', source: text, translation: out.value.trim(), lang: $<HTMLSelectElement>('tr-to').value || detected });
-      } else if (dlg.returnValue === 'ok' && text) resolve({ action: 'convert', text: valueLines(text) });
+      } else if (dlg.returnValue === 'ok' && text) {
+        const v = valueLines(text);
+        // other lines in the box (a note around the value) stay as they are
+        resolve({ action: 'convert', text: v, partial: v !== text.replace(/\s*\n\s*/g, ' ').trim() });
+      }
       else resolve(null);
     };
   });
@@ -1525,15 +1607,13 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
   const d = state.drawing;
   if (!d) return;
   let read: Awaited<ReturnType<typeof readBoxText>> = null;
-  if (d.pdf) {
-    busy('Reading the text in the box…');
-    try {
-      read = await readBoxText(d, frame, frame === poly ? undefined : poly);
-    } catch (err) {
-      console.warn(err);
-    } finally {
-      busy(null);
-    }
+  busy('Reading the text in the box…');
+  try {
+    read = await readBoxText(d, frame, frame === poly ? undefined : poly);
+  } catch (err) {
+    console.warn(err);
+  } finally {
+    busy(null);
   }
   const answer = await askBoxText(read);
   if (answer === null) return;
@@ -1547,7 +1627,8 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
   // written like the letters in the box (or, when none were read, like the page's other text)
   Object.assign(t, read?.style ?? pageStyle(d) ?? {});
   if (t.face) t.width = advance(getFace(t.face), text) * t.fontSize * (t.hscale ?? 1);
-  const edit = addBoxedText(d, state.dims, poly, t, customSuffix());
+  // only the line with the value is covered when the box holds more (the rest of a note stays)
+  const edit = addBoxedText(d, state.dims, answer.partial && read ? lineRect(read.placement) : poly, t, customSuffix());
   const added = edit.dims.filter((x) => x.textId === t.id);
   if (!added.length) {
     toast(`"${text}" holds no number, so there is nothing to convert. Type the value as the drawing shows it, or translate the text instead.`, true, 7000);
@@ -1576,54 +1657,77 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
  * with the dimensions, so it can be undone, moved, resized and turned.
  */
 function placeTranslation(d: Drawing, poly: Pt[], frame: Pt[], read: BoxRead | null, a: Extract<BoxAnswer, { action: 'translate' }>): void {
-  const src = a.source.replace(/\s*\n\s*/g, ' ');
-  // one line across the middle of the box, at the size of the letters read there
-  const t = textFromBox(src, frame, read?.color ?? '#000000');
-  Object.assign(t, read?.style ?? pageStyle(d) ?? {});
-  if (read) t.fontSize = Math.min(t.fontSize, Math.hypot(read.placement.up.x, read.placement.up.y));
-  const dir = { x: Math.cos(t.rotation), y: Math.sin(t.rotation) };
+  const srcLines = a.source.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const trLines = a.translation.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  if (!trLines.length) return;
+  // reading direction: the text read in the box, else the box's longer side
+  const base = textFromBox(a.source.replace(/\s*\n\s*/g, ' '), frame, read?.color ?? '#000000');
+  const angle = read ? Math.atan2(read.placement.across.y, read.placement.across.x) : base.rotation;
+  const dir = { x: Math.cos(angle), y: Math.sin(angle) };
   const up = { x: -dir.y, y: dir.x };
-  const c = { x: frame.reduce((q, p) => q + p.x, 0) / frame.length, y: frame.reduce((q, p) => q + p.y, 0) / frame.length };
-  const along = frame.map((p) => (p.x - c.x) * dir.x + (p.y - c.y) * dir.y);
-  const half = (Math.max(...along) - Math.min(...along)) / 2;
-  const margin = Math.min(0.3 * t.fontSize, half * 0.1);
-  t.pos = { x: c.x - dir.x * (half - margin) - up.x * 0.36 * t.fontSize, y: c.y - dir.y * (half - margin) - up.y * 0.36 * t.fontSize };
-  // the translation is centred on the text's middle: the middle of the box
-  t.width = 2 * (half - margin);
-  const edit = addBoxedText(d, state.dims, poly, t, customSuffix());
-  // in place of the values found in it: the whole text, translated
-  counterTr += 1;
-  const dim: Dimension = {
-    id: `tr${counterTr}`,
-    textId: t.id,
-    start: 0,
-    end: src.length,
-    value: NaN,
-    unit: null,
-    spaced: false,
-    kind: 'linear',
-    original: src,
-    manual: true,
-    translated: true,
-    override: { text: a.translation, lang: a.lang },
-  };
-  // the box's longer side is the room there is: a longer translation is written smaller
-  const room = 2 * (half - margin);
-  const need = advanceOf(t, a.translation);
+  const o = frame[0];
+  const along = frame.map((p) => (p.x - o.x) * dir.x + (p.y - o.y) * dir.y);
+  const across = frame.map((p) => (p.x - o.x) * up.x + (p.y - o.y) * up.y);
+  const [a0, a1, b0, b1] = [Math.min(...along), Math.max(...along), Math.min(...across), Math.max(...across)];
+  const at = (u: number, v: number): Pt => ({ x: o.x + dir.x * u + up.x * v, y: o.y + dir.y * u + up.y * v });
+  // one band of the box per line of the translation, top to bottom
+  const n = trLines.length;
+  const band = (b1 - b0) / n;
+  const readSize = read ? Math.hypot(read.placement.up.x, read.placement.up.y) : Infinity;
+  const size = Math.min(readSize, band * 0.8, base.fontSize);
+  const margin = Math.min(0.3 * size, (a1 - a0) * 0.05);
+  const room = a1 - a0 - 2 * margin;
   snapshot();
-  // the text as it is on the drawing (a copy that holds the box's region)
-  const placed = edit.entities.find((e): e is TextEntity => e.kind === 'text' && e.id === t.id);
-  if (placed && need > room * 1.02) placed.sizeScale = Math.max(0.3, Math.floor((room / need) * 20) / 20);
-  d.entities = edit.entities;
-  state.dims = [...edit.dims.filter((x) => x.textId !== t.id), dim];
-  for (const id of edit.replaced) state.used.delete(id);
-  convert(dim, state.settings);
+  const added: Dimension[] = [];
+  trLines.forEach((line, i) => {
+    const hi = b1 - i * band;
+    const lo = hi - band;
+    const mid = (hi + lo) / 2;
+    const original = n === srcLines.length ? srcLines[i] : i === 0 ? srcLines.join(' ') : '';
+    const t: TextEntity = {
+      ...base,
+      id: `${base.id}-${i}`,
+      text: original || line,
+      pos: at(a0 + margin, mid - 0.36 * size),
+      fontSize: size,
+      rotation: angle,
+      width: room,
+    };
+    Object.assign(t, read?.style ?? pageStyle(d) ?? {});
+    t.fontSize = size;
+    // a single line covers what the user drew; several share the box in bands
+    const cover = n === 1 ? poly : [at(a0, lo), at(a1, lo), at(a1, hi), at(a0, hi)];
+    const edit = addBoxedText(d, state.dims, cover, t, customSuffix());
+    counterTr += 1;
+    const dim: Dimension = {
+      id: `tr${counterTr}`, textId: t.id, start: 0, end: t.text.length, value: NaN, unit: null, spaced: false, kind: 'linear',
+      original: t.text, manual: true, translated: true, override: { text: line, lang: a.lang },
+    };
+    // a line longer than the box is written smaller
+    const placed = edit.entities.find((e): e is TextEntity => e.kind === 'text' && e.id === t.id);
+    const need = advanceOf(t, line);
+    if (placed && need > room * 1.02) placed.sizeScale = Math.max(0.3, Math.floor((room / need) * 20) / 20);
+    d.entities = edit.entities;
+    state.dims = [...edit.dims.filter((x) => x.textId !== t.id), dim];
+    for (const id of edit.replaced) state.used.delete(id);
+    added.push(dim);
+  });
+  for (const dim of added) convert(dim, state.settings);
   d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
   renderStatic();
   renderDynamic();
   toast(`Wrote the ${languageName(a.lang)} translation over the box.`, false, 6000, { label: 'Undo', run: undo });
 }
 let counterTr = 0;
+
+/** The area of one line of text placed by `p`, with a little room around its letters. */
+function lineRect(p: Placement): Pt[] {
+  const at = (a: number, u: number): Pt => ({ x: p.origin.x + p.across.x * a + p.up.x * u, y: p.origin.y + p.across.y * a + p.up.y * u });
+  const len = Math.hypot(p.across.x, p.across.y) || 1;
+  const em = Math.hypot(p.up.x, p.up.y);
+  const m = (0.15 * em) / len;
+  return [at(-m, -0.3), at(1 + m, -0.3), at(1 + m, 1.05), at(-m, 1.05)];
+}
 
 /** Width of `s` written like text `t`: its face, or an even width per character. */
 function advanceOf(t: TextEntity, s: string): number {

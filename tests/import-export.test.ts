@@ -158,3 +158,31 @@ describe('DWG', () => {
     expect(re.entities.some((e) => e.kind === 'text' && e.text === '17,70 in')).toBe(true);
   });
 });
+
+describe('dimension text written over by a note', () => {
+  it('counts only the measured value as a dimension', () => {
+    // a DIMENSION whose text is a note of four lines, the measurement in the last ("<>")
+    const note = '{\\fSimSun|b0|i0|c134|p2;加热元件\\P数量：}12{\\fSimSun|b0|i0|c134|p2;个\\P材质：}304{\\fSimSun|b0|i0|c134|p2;不锈钢}\\P{\\fSimSun|b0|i0|c134|p2;电热管直径}%%C12';
+    const over = note.replace(/12$/, '<>');
+    const dxf = [
+      '0', 'SECTION', '2', 'HEADER', '9', '$ACADVER', '1', 'AC1032', '0', 'ENDSEC',
+      '0', 'SECTION', '2', 'BLOCKS',
+      '0', 'BLOCK', '8', '0', '2', '*D1', '70', '1', '10', '0', '20', '0', '30', '0', '3', '*D1',
+      '0', 'MTEXT', '8', '0', '10', '10', '20', '10', '30', '0', '40', '2.5', '71', '1', '1', note,
+      '0', 'ENDBLK',
+      '0', 'ENDSEC',
+      '0', 'SECTION', '2', 'ENTITIES',
+      '0', 'DIMENSION', '8', '0', '2', '*D1', '10', '0', '20', '0', '30', '0', '11', '10', '21', '10', '31', '0', '70', '3', '1', over, '42', '12',
+      '0', 'ENDSEC', '0', 'EOF', '',
+    ].join('\n');
+    const d = importDxf(new TextEncoder().encode(dxf), 'note.dxf');
+    const texts = d.entities.filter((e): e is TextEntity => e.kind === 'text');
+    expect(texts.map((t) => [t.text, !!t.isDimension])).toEqual([
+      ['加热元件', false],
+      ['数量：12个', false],
+      ['材质：304不锈钢', false],
+      ['电热管直径Ø12', true],
+    ]);
+    expect(detectDimensions(d).map((x) => x.original)).toEqual(['12']);
+  });
+});

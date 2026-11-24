@@ -128,6 +128,9 @@ function makeText(
   extra: Partial<TextEntity> = {},
 ): TextEntity {
   const h = capHeight > 0 ? capHeight : 2.5;
+  // a Chinese, Japanese or Korean character is about one em wide
+  let units = 0;
+  for (const ch of text) units += /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uff60]/.test(ch) ? EM_PER_CAP : CHAR_W;
   return {
     kind: 'text',
     id: newId('t'),
@@ -136,18 +139,41 @@ function makeText(
     pos,
     fontSize: h * EM_PER_CAP,
     rotation: (rotationDeg * Math.PI) / 180,
-    width: h * CHAR_W * Math.max(1, text.length),
+    width: h * Math.max(CHAR_W, units),
     widthExact: false,
     align,
     ...extra,
   };
 }
 
-function convertTextLike(e: any, ctx: Ctx, out: Entity[], dim?: { handle?: string; type: TextEntity['dimType'] }): void {
+/**
+ * The text of a DIMENSION. `measured` says which of its lines hold the
+ * measurement: all of them (no text of the user's own, or one line the user
+ * typed), those where the user's text has "<>" (the measured value goes
+ * there), or none (a note of several lines typed by the user). Only lines with the measurement count every number as a length;
+ * the others follow the usual rules ("数量：12个" is a count, "304不锈钢" a grade).
+ */
+interface DimInfo {
+  handle?: string;
+  type: TextEntity['dimType'];
+  measured: 'all' | 'none' | Set<number>;
+}
+
+function measuredLines(override: unknown): DimInfo['measured'] {
+  if (typeof override !== 'string' || !override || override === '<>') return 'all';
+  const lines = decodeDxfText(override, true);
+  // typed by hand: one line is the value written out ("Ø30", "5.91 in"); a note of several lines is a note
+  if (!override.includes('<>')) return lines.filter((l) => l.text.trim()).length > 1 ? 'none' : 'all';
+  return new Set(lines.flatMap((l, i) => (l.text.includes('<>') ? [i] : [])));
+}
+
+function convertTextLike(e: any, ctx: Ctx, out: Entity[], dim?: DimInfo): void {
   const style = styleOf(e, ctx);
   if (dim) style.layer = e.layer ?? 'DIMENSIONS';
+  const holds = (i: number) => !!dim && (dim.measured === 'all' || (dim.measured !== 'none' && dim.measured.has(i)));
+  let lineNo = 0;
   const extra = (line: { text: string; starts: number[]; ends: number[] }, raw: string, mtext: boolean): Partial<TextEntity> => ({
-    isDimension: !!dim,
+    isDimension: holds(lineNo),
     dimType: dim?.type,
     dxf: { handle: e.handle, raw, starts: line.starts, ends: line.ends, mtext, dimHandle: dim?.handle },
   });
@@ -170,6 +196,7 @@ function convertTextLike(e: any, ctx: Ctx, out: Entity[], dim?: { handle?: strin
       const r = (rot * Math.PI) / 180;
       p = { x: p.x - Math.sin(r) * shift, y: p.y + Math.cos(r) * shift };
     }
+    lineNo = dim && dim.measured !== 'all' && dim.measured !== 'none' && dim.measured.size ? Math.min(...dim.measured) : 0;
     const te = makeText(line.text, p, h, rot, align, style, extra(line, raw, false));
     if (e.xScale && e.xScale > 0) {
       te.width *= e.xScale;
@@ -199,6 +226,7 @@ function convertTextLike(e: any, ctx: Ctx, out: Entity[], dim?: { handle?: strin
     // distance from the attachment point down to this line's baseline
     const down = h + spacing * i - offset;
     const p = { x: base.x + Math.sin(r) * down, y: base.y - Math.cos(r) * down };
+    lineNo = i;
     out.push(makeText(line.text, p, h, rot, align, style, extra(line, raw, true)));
   });
 }
@@ -287,7 +315,7 @@ function convertEntity(e: any, ctx: Ctx, out: Entity[], inBlock: boolean): void 
     case 'DIMENSION': {
       const type = DIM_TYPES[(Number(e.dimensionType) || 0) & 7] ?? 'linear';
       const blk = e.block ? ctx.dxf.blocks?.[e.block] : null;
-      const dimInfo = { handle: e.handle, type };
+      const dimInfo: DimInfo = { handle: e.handle, type, measured: measuredLines(e.text) };
       let gotText = false;
       if (blk?.entities) {
         // Dimension blocks are drawn in WCS at insertion (0,0): inline their geometry.
@@ -303,7 +331,7 @@ function convertEntity(e: any, ctx: Ctx, out: Entity[], inBlock: boolean): void 
         const value = override ?? (typeof e.actualMeasurement === 'number' ? String(+e.actualMeasurement.toFixed(4)) : '');
         if (value) {
           const prefix = override ? '' : type === 'radius' ? 'R' : type === 'diameter' ? '\u00d8' : '';
-          const te = makeText(prefix + value, pt(e.middleOfText), 2.5, 0, 'center', styleOf(e, ctx), { isDimension: true, dimType: type });
+          const te = makeText(prefix + value, pt(e.middleOfText), 2.5, 0, 'center', styleOf(e, ctx), { isDimension: dimInfo.measured !== 'none', dimType: type });
           te.dxf = { raw: te.text, starts: [...te.text].map((_, i) => i), ends: [...te.text].map((_, i) => i + 1), mtext: true, dimHandle: e.handle };
           out.push(te);
         }

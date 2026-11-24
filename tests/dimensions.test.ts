@@ -135,3 +135,16 @@ describe('unit detection', () => {
     expect(guessDimensionUnit(['nothing here'], 'mm')).toBe('mm');
   });
 });
+
+describe('counts of features', () => {
+  it('are not lengths, even in dimension text', async () => {
+    const { findLengthTokens } = await import('../src/dimensions');
+    const vals = (t: string, isDimension = true) => findLengthTokens(t, { isDimension }).map((x) => t.slice(x.start, x.end));
+    expect(vals('12×∅6')).toEqual(['6']);
+    expect(vals('3X Ø10')).toEqual(['10']);
+    expect(vals('2×5/16-28安装孔')).toEqual([]);
+    // a size is still two lengths
+    expect(vals('100x50mm', false)).toEqual(['100', '50mm']);
+    expect(vals('24×∅12', false)).toEqual(['12']);
+  });
+});
