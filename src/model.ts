@@ -105,6 +105,8 @@ export interface InkPiece {
   u1: number;
   /** Outline in drawing coordinates, grown a little for anti-aliasing. */
   hull: Pt[];
+  /** Joined to a long straight stroke (a dimension line): an arrowhead or tick rather than a letter. */
+  onLine?: boolean;
 }
 
 export interface TextEntity extends Base {
@@ -144,6 +146,8 @@ export interface TextEntity extends Base {
   ocr?: boolean;
   /** Added by the user with a box. */
   manual?: boolean;
+  /** Read out of a line in another script: the letters next to it are other words. */
+  part?: boolean;
   /** The region the user drew (drawing coordinates): covered whole when the value is converted. */
   cover?: Pt[];
   /**
@@ -153,6 +157,8 @@ export interface TextEntity extends Base {
   offset?: Pt;
   /** Size of the converted text against the original (1 = same size), set in the dimension list. */
   sizeScale?: number;
+  /** Extra turn of the converted text (radians, counter-clockwise, about its middle), set in the dimension list. */
+  turn?: number;
   /** Its letters as found on the page (src/ink.ts): what a conversion whites out. */
   ink?: InkPiece[];
   dxf?: DxfTextSource;
@@ -249,6 +255,8 @@ export interface Drawing {
   detectedDimensionUnit: LengthUnit;
   pdf?: PdfSource;
   dxf?: DxfSource;
+  /** Opened from a picture (PNG, JPEG ...), which `pdf` holds on a page of its own. */
+  picture?: { mime: string; width: number; height: number; dpi: number };
   stats: ImportStats;
   warnings: string[];
 }

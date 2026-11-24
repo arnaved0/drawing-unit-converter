@@ -6,7 +6,8 @@
 import { detectBlocks } from '../analysis/blocks';
 import { compoundFill, subpathToEntity, type RawSeg, type RawSubpath } from '../analysis/shapes';
 import { guessDimensionUnit } from '../dimensions';
-import { apply, applyVec, drawingBounds, entityBox, IDENTITY, matScale, mul, pointInPoly, textCorners, type Mat } from '../geom';
+import { apply, applyVec, drawingBounds, entityBox, flattenSegs, IDENTITY, matScale, mul, pointInPoly, textCorners, type Mat } from '../geom';
+import { isWhite } from '../aci';
 import { countEntities, emptyStats, newId, TEXT_OUTLINES, type Drawing, type Entity, type Pt, type Style, type TextEntity } from '../model';
 import { advance, faceForFontName, getFace, type FaceId } from '../fonts/faces';
 
@@ -37,9 +38,12 @@ export interface TextStyleHint {
   text: string;
   /** Baseline start in PDF user space. */
   origin: [number, number];
-  face: FaceId;
-  hscale: number;
-  slant: number;
+  /** Absent for a part of a line in another script (see `part`). */
+  face?: FaceId;
+  hscale?: number;
+  slant?: number;
+  /** A run cut out of a line in another script: its neighbours on the page are other words. */
+  part?: boolean;
 }
 
 interface GState {
@@ -106,6 +110,8 @@ function parsePath(data: ArrayLike<number> | null | undefined, m: Mat): RawSubpa
 }
 
 interface RawText {
+  /** Position in the content stream of its first glyph: what is painted later lies on top. */
+  seq: number;
   str: string;
   origin: Pt;
   dir: Pt; // unit vector along the baseline
@@ -118,6 +124,7 @@ interface RawText {
   face?: FaceId;
   hscale?: number;
   slant?: number;
+  part?: boolean;
 }
 
 /** Name and style flags of a pdf.js font, when it has been loaded. */
@@ -175,6 +182,76 @@ function mergeRuns(items: RawText[]): RawText[] {
 
 
 /**
+ * The parts of a text that white patches painted after it leave visible.
+ * Each character is tested at a few points in the middle of its cell; a run
+ * of covered characters is cut out, and what is left becomes one text per
+ * visible run (positions and widths taken from the original).
+ */
+export function uncoveredParts(t: TextEntity, fills: { poly: Pt[]; box: { minX: number; minY: number; maxX: number; maxY: number } }[]): TextEntity[] {
+  const chars = [...t.text];
+  const n = chars.length;
+  if (!n) return [t];
+  const tb = entityBox(t, {});
+  const near = fills.filter((w) => w.box.maxX >= tb.minX && w.box.minX <= tb.maxX && w.box.maxY >= tb.minY && w.box.minY <= tb.maxY);
+  if (!near.length) return [t];
+  // character edges along the text: from its font when known, else even
+  const face = t.face ? getFace(t.face) : null;
+  const total = face ? advance(face, t.text) : n;
+  const edges: number[] = [0];
+  let acc = 0;
+  for (const ch of chars) {
+    acc += face ? advance(face, ch) : 1;
+    edges.push((acc / (total || 1)) * t.width);
+  }
+  const shift = t.align === 'center' ? -t.width / 2 : t.align === 'right' ? -t.width : 0;
+  const dx = Math.cos(t.rotation);
+  const dy = Math.sin(t.rotation);
+  const at = (u: number, v: number): Pt => ({ x: t.pos.x + dx * (shift + u) - dy * v, y: t.pos.y + dy * (shift + u) + dx * v });
+  const covered = chars.map((ch, k) => {
+    if (!/\S/.test(ch)) return null; // a space follows its neighbours
+    let hits = 0;
+    let tries = 0;
+    for (const fu of [0.3, 0.5, 0.7]) {
+      for (const fv of [0.22, 0.45]) {
+        const p = at(edges[k] + (edges[k + 1] - edges[k]) * fu, fv * t.fontSize);
+        tries++;
+        if (near.some((w) => p.x >= w.box.minX && p.x <= w.box.maxX && p.y >= w.box.minY && p.y <= w.box.maxY && pointInPoly(p, w.poly))) hits++;
+      }
+    }
+    return hits * 2 >= tries;
+  });
+  // spaces take the state of the characters around them
+  for (let k = 0; k < n; k++) {
+    if (covered[k] !== null) continue;
+    let a = k - 1;
+    while (a >= 0 && covered[a] === null) a--;
+    let b = k + 1;
+    while (b < n && covered[b] === null) b++;
+    covered[k] = (a < 0 || covered[a]) && (b >= n || covered[b]);
+  }
+  if (!covered.some(Boolean)) return [t];
+  const out: TextEntity[] = [];
+  for (let k = 0; k < n; ) {
+    if (covered[k]) {
+      k++;
+      continue;
+    }
+    let e = k;
+    while (e < n && !covered[e]) e++;
+    let a = k;
+    let b = e;
+    while (a < b && !/\S/.test(chars[a])) a++;
+    while (b > a && !/\S/.test(chars[b - 1])) b--;
+    if (b > a) {
+      const p = at(edges[a], 0);
+      out.push({ ...t, id: newId('t'), text: chars.slice(a, b).join(''), pos: p, align: 'left', width: edges[b] - edges[a] });
+    }
+    k = e;
+  }
+  return out;
+}
+
+/**
  * Moves filled shapes that lie inside an OCR text line to the TEXT_OUTLINES
  * layer. Triangles are left alone: those are arrowheads.
  */
@@ -223,7 +300,9 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
 
     const warnings: string[] = [];
     const entities: Entity[] = [];
-    const glyphColors: { ch: string; color: string; invisible: boolean }[] = [];
+    const glyphColors: { ch: string; color: string; invisible: boolean; seq: number }[] = [];
+    /** White fills (paper-coloured patches), in the order they are painted. */
+    const whiteFills: { poly: Pt[]; box: { minX: number; minY: number; maxX: number; maxY: number }; seq: number }[] = [];
     const pendingImages: { objId: string | null; inline: any; ctm: Mat }[] = [];
     const stack: GState[] = [];
     let gs: GState = { ctm: [...IDENTITY], stroke: '#000000', fill: '#000000', lineWidth: 1, dash: [], textRender: 0 };
@@ -291,7 +370,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
         case OPS.showSpacedText: {
           for (const g of (a[0] ?? []) as any[]) {
             if (g && typeof g === 'object' && typeof g.unicode === 'string' && g.unicode.trim()) {
-              glyphColors.push({ ch: g.unicode, color: gs.textRender === 1 ? gs.stroke : gs.fill, invisible: gs.textRender === 3 });
+              glyphColors.push({ ch: g.unicode, color: gs.textRender === 1 ? gs.stroke : gs.fill, invisible: gs.textRender === 3, seq: i });
             }
           }
           break;
@@ -303,6 +382,16 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
           const data = a[1]?.[0] as ArrayLike<number> | null;
           const m = mul(userToDrawing, gs.ctm);
           const subpaths = parsePath(data, m);
+          if (paint.fill && isWhite(gs.fill)) {
+            // a white patch hides what was painted before it (a value whited out by a converter)
+            for (const sp of subpaths) {
+              const poly = flattenSegs(sp.start, sp.segs.map((g) => (g.t === 'L' ? g : { t: 'C' as const, c1: g.c1, c2: g.c2, p: g.p })), 4);
+              if (poly.length < 3) continue;
+              const xs = poly.map((p) => p.x);
+              const ys = poly.map((p) => p.y);
+              whiteFills.push({ poly, box: { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) }, seq: i });
+            }
+          }
           if (paint.fill && !paint.stroke && subpaths.length > 1) {
             // one filled shape with holes (letters drawn as outlines, rings)
             const st = styleFor('FILLS', gs.fill);
@@ -373,6 +462,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
 
     // text
     const tc = await page.getTextContent({ includeMarkedContent: false });
+    let hiddenText = false;
     const raw: RawText[] = [];
     let gp = 0;
     for (const item of tc.items as any[]) {
@@ -381,11 +471,13 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
       // colour and visibility: walk the glyph stream in parallel
       let color = '#000000';
       let invisible = false;
+      let seq = -1;
       const first = item.str.trim()[0];
       for (let look = gp; look < Math.min(glyphColors.length, gp + 60); look++) {
         if (glyphColors[look].ch === first || glyphColors[look].ch.startsWith(first)) {
           color = glyphColors[look].color;
           invisible = glyphColors[look].invisible;
+          seq = glyphColors[look].seq;
           gp = look + item.str.replace(/\s/g, '').length;
           break;
         }
@@ -399,11 +491,12 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
       const widthScale = matScale(userToDrawing);
       const width = (item.width ?? 0) * widthScale;
       const generic = tc.styles?.[item.fontName]?.fontFamily ?? 'sans-serif';
-      const run: RawText = { str: item.str, origin, dir: { x: dv.x / dl, y: dv.y / dl }, size, width, color, font: generic, invisible };
+      const run: RawText = { seq, str: item.str, origin, dir: { x: dv.x / dl, y: dv.y / dl }, size, width, color, font: generic, invisible };
       if (invisible) {
         // OCR text layer: the Scan & OCR pass matched the letters it covers to a face
         const hint = opts.textStyles?.length ? nearestHint(opts.textStyles, t[4], t[5], item.str, Math.hypot(t[2], t[3])) : null;
-        if (hint) Object.assign(run, { face: hint.face, hscale: hint.hscale, slant: hint.slant });
+        if (hint?.face) Object.assign(run, { face: hint.face, hscale: hint.hscale, slant: hint.slant });
+        if (hint?.part) run.part = true;
       } else {
         // real text: a lookalike of the font it names, as wide as the original
         const info = fontInfo(page, item.fontName);
@@ -418,7 +511,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
     for (const r of mergeRuns(raw)) {
       const text = r.str.replace(/\s+$/, '').replace(/^\s+/, '');
       if (!text) continue;
-      const te: TextEntity = {
+      const te0: TextEntity = {
         kind: 'text',
         id: newId('t'),
         style: { layer: 'TEXT', color: r.color },
@@ -431,11 +524,16 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
         align: 'left',
         fontFamily: r.font,
       };
-      if (r.face) te.face = r.face;
-      if (r.hscale && r.hscale !== 1) te.hscale = r.hscale;
-      if (r.slant) te.slant = r.slant;
-      if (r.invisible) te.ocr = true;
-      entities.push(te);
+      if (r.face) te0.face = r.face;
+      if (r.hscale && r.hscale !== 1) te0.hscale = r.hscale;
+      if (r.slant) te0.slant = r.slant;
+      if (r.invisible) te0.ocr = true;
+      if (r.part) te0.part = true;
+      // what a white patch painted later hides is not on the page any more
+      const later = r.seq >= 0 ? whiteFills.filter((w) => w.seq > r.seq) : [];
+      const visible = later.length ? uncoveredParts(te0, later) : [te0];
+      if (visible.length !== 1 || visible[0] !== te0) hiddenText = true;
+      entities.push(...visible);
     }
 
     // Letter shapes under OCR text are that text: they keep being drawn, but are
@@ -461,6 +559,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
       warnings.push('No text found on this page. Turn on "Read text with OCR first" to read text that is drawn as outlines or scanned.');
     }
     if (pendingImages.length && !opts.encodeImage) warnings.push('Images were found but not decoded.');
+    if (hiddenText) warnings.push('Some text is covered by white patches (for example values replaced by an earlier conversion) and was left out.');
 
     return {
       name,

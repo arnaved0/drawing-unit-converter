@@ -56,6 +56,46 @@ export function normaliseOcrText(s: string): string | null {
   return WIN_ANSI.test(t) ? t : null;
 }
 
+/** A character drawn about a full em wide (Chinese, Japanese, Korean, full-width forms). */
+const WIDE = /[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uff60\uffe0-\uffe6]/;
+
+/**
+ * The parts of a line in another script that the PDF font can hold, with
+ * where each lies along the line (0..1): "长度 300mm" -> "300mm" at 0.45..1.
+ * Positions come from typical letter widths (a CJK character about one em,
+ * a Latin letter about half); the letters are measured on the page later.
+ */
+export function latinRuns(raw: string): { text: string; from: number; to: number }[] {
+  const s = raw.normalize('NFKC');
+  const chars = [...s];
+  const weight = (ch: string) => (WIDE.test(ch) ? 1 : /\s/.test(ch) ? 0.3 : /[il.,:;'|!]/.test(ch) ? 0.3 : /[mwMW]/.test(ch) ? 0.85 : 0.56);
+  const total = chars.reduce((a, ch) => a + weight(ch), 0) || 1;
+  const out: { text: string; from: number; to: number }[] = [];
+  let pos = 0;
+  let cur: { chars: string[]; from: number; to: number } | null = null;
+  const flush = () => {
+    if (!cur) return;
+    // punctuation that belonged to the other script's words (a full-width colon)
+    while (cur.chars.length && /[\s:;,]/.test(cur.chars[0])) cur.from += weight(cur.chars.shift()!);
+    const text = normaliseOcrText(cur.chars.join(''));
+    // a run worth writing: it holds a digit, or is a word of two letters or more
+    if (text && (/\d/.test(text) || /[A-Za-z]{2}/.test(text))) out.push({ text, from: cur.from / total, to: cur.to / total });
+    cur = null;
+  };
+  for (const ch of chars) {
+    const w = weight(ch);
+    const ok = !WIDE.test(ch) && WIN_ANSI.test(ch);
+    if (ok && !(cur === null && /\s/.test(ch))) {
+      cur ??= { chars: [], from: pos, to: pos };
+      cur.chars.push(ch);
+      if (/\S/.test(ch)) cur.to = pos + w;
+    } else if (!ok) flush();
+    pos += w;
+  }
+  flush();
+  return out;
+}
+
 /** Fraction of box `a` (x0, y0, x1, y1) covered by the boxes in `list`. */
 function covered(a: number[], list: number[][]): number {
   const area = (b: number[]) => Math.max(0, b[2] - b[0]) * Math.max(0, b[3] - b[1]);
@@ -146,10 +186,19 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
   let unsupported = 0;
   const toUser = (x: number, y: number) => vp.convertToPdfPoint(x, y) as [number, number];
   const kept: { l: FoundLine; text: string }[] = [];
+  /** Lines in another script, of which only the Latin parts (values, units) go into the text layer. */
+  const partial: { l: FoundLine; runs: ReturnType<typeof latinRuns> }[] = [];
   for (const l of lines) {
     const text = normaliseOcrText(l.text);
     if (text === null) {
       unsupported++;
+      const runs = latinRuns(l.text);
+      if (runs.length) {
+        const d = { x: -l.u.y, y: l.u.x };
+        const hx = Math.abs(l.u.x) * l.len + Math.abs(d.x) * l.hgt;
+        const hy = Math.abs(l.u.y) * l.len + Math.abs(d.y) * l.hgt;
+        if (covered([l.c.x - hx / 2, l.c.y - hy / 2, l.c.x + hx / 2, l.c.y + hy / 2], existing) < 0.5) partial.push({ l, runs });
+      }
       continue;
     }
     // a lone letter or symbol is nearly always a piece of geometry read as text,
@@ -187,6 +236,22 @@ export async function preprocessPage(bytes: Uint8Array, page: PdfPage, pageIndex
     words.push({ text, ...place, rgb: l.rgb });
     if (fit) styles.push({ text, origin: place.origin, face: fit.face, hscale: fit.hscale, slant: fit.slant });
   });
+  // the Latin parts of lines in other scripts, each where it lies along its line
+  for (const { l, runs } of partial) {
+    const p = placeLine(l, toUser);
+    for (const r of runs) {
+      const k = r.to - r.from;
+      const origin: [number, number] = [p.origin[0] + p.across[0] * r.from, p.origin[1] + p.across[1] * r.from];
+      styles.push({ text: r.text, origin, part: true });
+      words.push({
+        text: r.text,
+        origin,
+        across: [p.across[0] * k, p.across[1] * k],
+        up: p.up,
+        rgb: l.rgb,
+      });
+    }
+  }
   opts.onProgress?.(1, 'Adding the text layer');
   const out = await withTextLayers(bytes, new Map([[pageIndex, words]]));
   const image = { width: pixels.width, height: pixels.height, data: pixels.data, transform: vp.transform as number[] };

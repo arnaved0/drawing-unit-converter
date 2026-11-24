@@ -6,8 +6,8 @@
 // part of a letter. A conversion then whites out the outline of each letter it
 // replaces, so lines under the text and words beside it stay untouched.
 
-import { apply, invert, mul, type Mat } from './geom';
-import type { Drawing, InkPiece, Pt, TextEntity } from './model';
+import { apply, insertMatrix, invert, mul, type Mat } from './geom';
+import type { Block, Drawing, Entity, InkPiece, Pt, TextEntity } from './model';
 import { advance, getFace } from './fonts/faces';
 
 export interface PageImage {
@@ -52,7 +52,64 @@ export function pageToImage(viewportTransform: Mat, userToDrawing: Mat): Mat {
 
 /** Measures the letters of every text on the page. */
 export function measureInk(d: Drawing, img: PageImage): void {
-  for (const e of d.entities) if (e.kind === 'text' && !e.cover) e.ink = measureTextInk(img, e);
+  const arrows = arrowheads(d.entities, d.blocks);
+  for (const e of d.entities) if (e.kind === 'text' && !e.cover) e.ink = measureTextInk(img, e, arrows);
+}
+
+/** A filled triangle (drawing coordinates) and its bounding box. */
+export interface Triangle {
+  pts: Pt[];
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+/**
+ * Filled triangles of the drawing: arrowheads. No letter is a plain triangle,
+ * so their pixels are never taken for part of a text, even where they touch it.
+ */
+export function arrowheads(entities: Entity[], blocks: Record<string, Block>, m: Mat = [1, 0, 0, 1, 0, 0], depth = 0, out: Triangle[] = []): Triangle[] {
+  for (const e of entities) {
+    let pts: Pt[] | null = null;
+    if (e.kind === 'solid') pts = e.pts;
+    else if (e.kind === 'polyline' && e.closed && e.style.fill && e.pts.every((v) => !v.bulge)) pts = e.pts;
+    else if (e.kind === 'curve' && !e.more?.length && e.style.fill && e.segs.every((g) => g.t === 'L')) pts = [e.start, ...e.segs.map((g) => g.p)];
+    else if (e.kind === 'insert' && depth < 8) {
+      const b = blocks[e.block];
+      if (b) arrowheads(b.entities, blocks, mul(m, insertMatrix(e.pos, e.rotation, e.sx, e.sy, b.base)), depth + 1, out);
+      continue;
+    }
+    if (!pts) continue;
+    // drop repeated corners (a closing point, a "quad" with two equal corners)
+    const q: Pt[] = [];
+    for (const p of pts.map((p) => apply(m, p))) if (!q.some((o) => Math.hypot(o.x - p.x, o.y - p.y) < 1e-6)) q.push(p);
+    if (q.length !== 3) continue;
+    const area = Math.abs((q[1].x - q[0].x) * (q[2].y - q[0].y) - (q[2].x - q[0].x) * (q[1].y - q[0].y)) / 2;
+    if (!(area > 1e-6)) continue;
+    const xs = q.map((p) => p.x);
+    const ys = q.map((p) => p.y);
+    out.push({ pts: q, minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) });
+  }
+  return out;
+}
+
+/** Inside triangle `t`, or closer to it than `g`. */
+function nearTriangle(p: Pt, t: Triangle, g: number): boolean {
+  if (p.x < t.minX - g || p.x > t.maxX + g || p.y < t.minY - g || p.y > t.maxY + g) return false;
+  const [a, b, c] = t.pts;
+  const s = (u: Pt, v: Pt) => (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+  const d1 = s(a, b);
+  const d2 = s(b, c);
+  const d3 = s(c, a);
+  if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) return true;
+  const seg = (u: Pt, v: Pt) => {
+    const lx = v.x - u.x;
+    const ly = v.y - u.y;
+    const k = Math.max(0, Math.min(1, ((p.x - u.x) * lx + (p.y - u.y) * ly) / (lx * lx + ly * ly || 1)));
+    return Math.hypot(p.x - u.x - lx * k, p.y - u.y - ly * k);
+  };
+  return Math.min(seg(a, b), seg(b, c), seg(c, a)) < g;
 }
 
 /** Darkness at which a pixel counts as ink (min channel below this): faint anti-aliased edges included. */
@@ -63,7 +120,7 @@ const INK_BELOW = 205;
  * straight strokes that run through or under it. `u` is measured along the
  * text from its position (as in textCorners).
  */
-export function measureTextInk(img: PageImage, t: TextEntity): InkPiece[] {
+export function measureTextInk(img: PageImage, t: TextEntity, arrows: Triangle[] = []): InkPiece[] {
   const em = t.fontSize;
   const pxPerMm = Math.sqrt(Math.abs(img.toImage[0] * img.toImage[3] - img.toImage[1] * img.toImage[2]));
   if (!(em * pxPerMm >= 4)) return [];
@@ -85,9 +142,20 @@ export function measureTextInk(img: PageImage, t: TextEntity): InkPiece[] {
   const vOf = (j: number) => vB - (j + 0.5) * step;
   const ink = new Uint8Array(W * H);
   const m = img.toImage;
+  // arrowheads near the text (their anti-aliased edge too)
+  const corners = [at(uA, vA), at(uB, vA), at(uB, vB), at(uA, vB)];
+  const near = arrows.filter(
+    (a) =>
+      a.maxX >= Math.min(...corners.map((c) => c.x)) &&
+      a.minX <= Math.max(...corners.map((c) => c.x)) &&
+      a.maxY >= Math.min(...corners.map((c) => c.y)) &&
+      a.minY <= Math.max(...corners.map((c) => c.y)),
+  );
+  const grow = 1.6 * step;
   for (let j = 0; j < H; j++) {
     for (let i = 0; i < W; i++) {
       const p = at(uOf(i), vOf(j));
+      if (near.length && near.some((a) => nearTriangle(p, a, grow))) continue;
       const x = Math.floor(m[0] * p.x + m[2] * p.y + m[4]);
       const y = Math.floor(m[1] * p.x + m[3] * p.y + m[5]);
       if (x < 0 || y < 0 || x >= img.width || y >= img.height) continue;
@@ -138,6 +206,7 @@ export function measureTextInk(img: PageImage, t: TextEntity): InkPiece[] {
     if (!ink[s] || seen[s]) continue;
     const comp: number[] = [];
     let edge = false;
+    let onLine = 0;
     seen[s] = 1;
     stack.push(s);
     while (stack.length) {
@@ -152,6 +221,7 @@ export function measureTextInk(img: PageImage, t: TextEntity): InkPiece[] {
           const ny = y + oy;
           if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
           const n = ny * W + nx;
+          if (line[n]) onLine++;
           if (ink[n] && !seen[n]) {
             seen[n] = 1;
             stack.push(n);
@@ -166,7 +236,10 @@ export function measureTextInk(img: PageImage, t: TextEntity): InkPiece[] {
     for (const k of kept) vs += vOf(Math.floor(k / W));
     const vc = vs / kept.length;
     if (vc < -0.3 * em || vc > 1.0 * em) continue;
-    out.push(piece(kept, W, uOf, vOf, step, at));
+    const p = piece(kept, W, uOf, vOf, step, at);
+    // an arrowhead or tick at the end of a dimension line: it touches the line along more than a pixel or two
+    if (onLine >= 3) p.onLine = true;
+    out.push(p);
   }
   return out;
 }
@@ -251,11 +324,14 @@ export function inkBetween(t: TextEntity, uFrom: number, uTo: number, chars?: [n
     // The ink of the text itself: the letters inside its estimated extent,
     // and the chain of letters next to them (the estimate is often a little
     // short or long), but not a mark further away.
-    const sorted0 = [...t.ink].sort((x, y) => x.u0 - y.u0);
+    // a mark on a dimension line beyond the ends of the text is an arrowhead, not a letter
+    const own = (p: InkPiece) => !p.onLine || (mid(p) >= E0 - 0.15 * em && mid(p) <= E1 + 0.15 * em);
+    const sorted0 = [...t.ink].filter(own).sort((x, y) => x.u0 - y.u0);
     const inside = sorted0.filter((p) => mid(p) >= E0 && mid(p) <= E1);
     let M0 = Math.min(...inside.map((p) => p.u0));
     let M1 = Math.max(...inside.map((p) => p.u1));
-    const step = 0.55 * em;
+    // a value cut out of a line in another script: the letters beside it are other words
+    const step = t.part ? 0.12 * em : 0.55 * em;
     for (let grew = true; grew && inside.length; ) {
       grew = false;
       for (const p of sorted0) {
@@ -274,7 +350,7 @@ export function inkBetween(t: TextEntity, uFrom: number, uTo: number, chars?: [n
     const fit = core.length && k > 0.8 && k < 1.25;
     const map = (e: number) => (fit ? M0 + (e - E0) * k : e);
     // gaps between letters (pieces that overlap along the text are one letter)
-    const sorted = [...t.ink].sort((x, y) => x.u0 - y.u0);
+    const sorted = [...t.ink].filter(own).sort((x, y) => x.u0 - y.u0);
     const gaps: number[] = [];
     let end = -Infinity;
     for (const p of sorted) {
@@ -290,11 +366,37 @@ export function inkBetween(t: TextEntity, uFrom: number, uTo: number, chars?: [n
     a = chars[0] <= Math.max(0, first) ? -Infinity : snap(map(cellEdge(t, chars[0])));
     b = chars[1] > last ? Infinity : snap(map(cellEdge(t, chars[1])));
     const hit = core.filter((p) => mid(p) > a && mid(p) < b);
-    return hit.length ? hit.map((p) => p.hull) : null;
+    // a letter that an arrowhead touches is one piece with it: keep the white-out within the text
+    const lo = E0 - 0.12 * em;
+    const hi = E1 + 0.12 * em;
+    return hit.length ? hit.map((p) => (p.onLine && (p.u0 < lo || p.u1 > hi) ? clipAlong(t, p.hull, lo, hi) : p.hull)).filter((h) => h.length >= 3) : null;
   }
   const slack = 0.06 * em;
   const hit = t.ink.filter((p) => mid(p) >= a - slack && mid(p) <= b + slack);
   return hit.length ? hit.map((p) => p.hull) : null;
+}
+
+/** The part of polygon `poly` (drawing coordinates) between `lo` and `hi` along text `t`. */
+function clipAlong(t: TextEntity, poly: Pt[], lo: number, hi: number): Pt[] {
+  const dx = Math.cos(t.rotation);
+  const dy = Math.sin(t.rotation);
+  const uOf = (p: Pt) => (p.x - t.pos.x) * dx + (p.y - t.pos.y) * dy;
+  const cut = (pts: Pt[], keep: (u: number) => boolean, edge: number): Pt[] => {
+    const out: Pt[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const q = pts[(i + 1) % pts.length];
+      const up = uOf(p);
+      const uq = uOf(q);
+      if (keep(up)) out.push(p);
+      if (keep(up) !== keep(uq)) {
+        const k = (edge - up) / (uq - up);
+        out.push({ x: p.x + (q.x - p.x) * k, y: p.y + (q.y - p.y) * k });
+      }
+    }
+    return out;
+  };
+  return cut(cut(poly, (u) => u >= lo, lo), (u) => u <= hi, hi);
 }
 
 /** The pixel at a drawing point is ink (for tests). */

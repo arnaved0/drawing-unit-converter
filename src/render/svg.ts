@@ -13,8 +13,8 @@ import { inkBetween } from '../ink';
 const f = (v: number) => (Math.abs(v) < 1e-9 ? '0' : +v.toFixed(4) + '');
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-function strokeStyle(s: Style, filled = false): string {
-  const color = displayColor(s.color);
+function strokeStyle(s: Style, filled = false, literal = false): string {
+  const color = displayColor(s.color, literal);
   const parts: string[] = [];
   if (s.stroke === false) parts.push('stroke:none');
   else {
@@ -23,7 +23,7 @@ function strokeStyle(s: Style, filled = false): string {
     parts.push(lw > 0 ? `stroke-width:max(var(--hair),${f(lw)}px)` : 'stroke-width:var(--hair)');
     if (s.dash?.length) parts.push(`stroke-dasharray:${s.dash.map((d) => f(Math.max(d, 0))).join(' ')}`);
   }
-  parts.push(filled && s.fill ? `fill:${displayColor(s.fill)}` : 'fill:none');
+  parts.push(filled && s.fill ? `fill:${displayColor(s.fill, literal)}` : 'fill:none');
   return parts.join(';');
 }
 
@@ -75,41 +75,41 @@ export function textAdvance(t: TextEntity, s: string): number {
   return (t.width / Math.max(1, [...t.text].length)) * [...s].length;
 }
 
-export function textSvg(t: TextEntity, text = t.text, pos = t.pos, align = t.align, extraClass = ''): string {
+export function textSvg(t: TextEntity, text = t.text, pos = t.pos, align = t.align, extraClass = '', literal = false): string {
   const deg = (t.rotation * 180) / Math.PI;
   const anchor = align === 'center' ? 'middle' : align === 'right' ? 'end' : 'start';
   // width factor and lean, so the text has the original's proportions
   const skew = t.slant ? ` skewX(${f((Math.atan(t.slant) * 180) / Math.PI)})` : '';
   const hs = t.hscale && t.hscale !== 1 ? t.hscale : 1;
-  return `<text class="t ${extraClass}" transform="translate(${f(pos.x)} ${f(pos.y)}) rotate(${f(deg)})${skew} scale(${f(hs)} -1)" font-size="${f(t.fontSize)}" text-anchor="${anchor}" font-family="${esc(cssFamily(t))}" fill="${displayColor(t.style.color)}" xml:space="preserve">${esc(text)}</text>`;
+  return `<text class="t ${extraClass}" transform="translate(${f(pos.x)} ${f(pos.y)}) rotate(${f(deg)})${skew} scale(${f(hs)} -1)" font-size="${f(t.fontSize)}" text-anchor="${anchor}" font-family="${esc(cssFamily(t))}" fill="${displayColor(t.style.color, literal)}" xml:space="preserve">${esc(text)}</text>`;
 }
 
-export function entitySvg(e: Entity): string {
+export function entitySvg(e: Entity, lit = false): string {
   switch (e.kind) {
     case 'line':
-      return `<line x1="${f(e.a.x)}" y1="${f(e.a.y)}" x2="${f(e.b.x)}" y2="${f(e.b.y)}" style="${strokeStyle(e.style)}"/>`;
+      return `<line x1="${f(e.a.x)}" y1="${f(e.a.y)}" x2="${f(e.b.x)}" y2="${f(e.b.y)}" style="${strokeStyle(e.style, false, lit)}"/>`;
     case 'polyline':
-      return e.pts.length < 2 ? '' : `<path d="${polyD(e.pts, e.closed)}" style="${strokeStyle(e.style, e.closed)}"/>`;
+      return e.pts.length < 2 ? '' : `<path d="${polyD(e.pts, e.closed)}" style="${strokeStyle(e.style, e.closed, lit)}"/>`;
     case 'circle':
-      return `<circle cx="${f(e.c.x)}" cy="${f(e.c.y)}" r="${f(e.r)}" style="${strokeStyle(e.style, true)}"/>`;
+      return `<circle cx="${f(e.c.x)}" cy="${f(e.c.y)}" r="${f(e.r)}" style="${strokeStyle(e.style, true, lit)}"/>`;
     case 'arc': {
       let sweep = e.end - e.start;
       while (sweep <= 0) sweep += 2 * Math.PI;
       const a = { x: e.c.x + e.r * Math.cos(e.start), y: e.c.y + e.r * Math.sin(e.start) };
       const b = { x: e.c.x + e.r * Math.cos(e.end), y: e.c.y + e.r * Math.sin(e.end) };
-      return `<path d="M${f(a.x)} ${f(a.y)}A${f(e.r)} ${f(e.r)} 0 ${sweep > Math.PI ? 1 : 0} 1 ${f(b.x)} ${f(b.y)}" style="${strokeStyle(e.style)}"/>`;
+      return `<path d="M${f(a.x)} ${f(a.y)}A${f(e.r)} ${f(e.r)} 0 ${sweep > Math.PI ? 1 : 0} 1 ${f(b.x)} ${f(b.y)}" style="${strokeStyle(e.style, false, lit)}"/>`;
     }
     case 'curve': {
       const d = [segsD(e.start, e.segs, e.closed), ...(e.more ?? []).map((s) => segsD(s.start, s.segs, s.closed))].join('');
       const rule = e.more?.length ? `;fill-rule:${e.evenOdd ? 'evenodd' : 'nonzero'}` : '';
-      return `<path d="${d}" style="${strokeStyle(e.style, true)}${rule}"/>`;
+      return `<path d="${d}" style="${strokeStyle(e.style, true, lit)}${rule}"/>`;
     }
     case 'solid': {
-      const fill = displayColor(e.style.fill ?? e.style.color);
+      const fill = displayColor(e.style.fill ?? e.style.color, lit);
       return `<polygon points="${e.pts.map((p) => `${f(p.x)},${f(p.y)}`).join(' ')}" style="fill:${fill};stroke:${fill};stroke-width:var(--hair)"/>`;
     }
     case 'text':
-      return textSvg(e);
+      return textSvg(e, e.text, e.pos, e.align, '', lit);
     case 'image': {
       const m: Mat = [e.p10.x - e.p00.x, e.p10.y - e.p00.y, e.p00.x - e.p01.x, e.p00.y - e.p01.y, e.p01.x, e.p01.y];
       if (!e.href) {
@@ -122,18 +122,22 @@ export function entitySvg(e: Entity): string {
   }
 }
 
+/** A PDF or an image: its colours are paper colours (white is white), and it is shown as rendered. */
+export const isPaper = (d: Drawing) => d.source === 'pdf';
+
 const blockId = (name: string) => 'blk-' + name.replace(/[^A-Za-z0-9_-]/g, (c) => '_' + c.charCodeAt(0).toString(16));
 
 /** Static part of the drawing: all geometry plus texts that hold no dimension. */
 export function renderGeometry(d: Drawing, skipTextIds: Set<string>): string {
   const defs: string[] = [];
+  const lit = isPaper(d);
   for (const b of Object.values(d.blocks)) {
-    defs.push(`<g id="${blockId(b.name)}">${b.entities.map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e))).join('')}</g>`);
+    defs.push(`<g id="${blockId(b.name)}">${b.entities.map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e, lit))).join('')}</g>`);
   }
   const body = d.entities
     // OCR text is invisible: the letters it reads are already drawn (outlines or image)
     .filter((e) => !(e.kind === 'text' && (skipTextIds.has(e.id) || e.ocr)))
-    .map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e)))
+    .map((e) => (e.kind === 'insert' ? insertSvg(e, d) : entitySvg(e, lit)))
     .join('');
   return `<defs>${defs.join('')}</defs>${body}`;
 }
@@ -255,15 +259,66 @@ export function coverPolygons(t: TextEntity, patch: { from: number; to: number; 
   return [[at(u0, v0), at(u1, v0), at(u1, v1), at(u0, v1)]];
 }
 
-/** Polygon (drawing coordinates) around dimension `dimId` in a laid-out text. */
+/**
+ * Polygon (drawing coordinates) around dimension `dimId` in a laid-out text.
+ * Where the value lies along the text comes from its font's character widths
+ * (not from counting characters); an unconverted value is then fitted to its
+ * letters as measured on the page, so the box sits on what it marks.
+ */
 export function dimPolygon(t: TextEntity, layout: TextLayout, dimId: string): Pt[] {
   const r = layout.display.ranges.get(dimId);
-  const n = Math.max(1, layout.display.text.length);
-  const from = r ? r.start / n : 0;
-  const to = r ? r.end / n : 1;
-  const pad = 0.12 * t.fontSize / Math.max(layout.width, 1e-9);
+  const disp = layout.display.text;
+  const n = Math.max(1, disp.length);
+  const W = Math.max(layout.width, 1e-9);
+  let from = r ? r.start / n : 0;
+  let to = r ? r.end / n : 1;
+  if (r && t.face) {
+    const total = textAdvance(t, disp);
+    if (total > 0) {
+      from = textAdvance(t, disp.slice(0, r.start)) / total;
+      to = textAdvance(t, disp.slice(0, r.end)) / total;
+    }
+  }
+  const em = t.fontSize;
+  const shift = layout.align === 'center' ? -W / 2 : layout.align === 'right' ? -W : 0;
+  let lo = -0.22 * em;
+  let hi = 0.8 * em;
+  // the letters measured on the page (the text as it is drawn there)
+  if (r && !layout.display.changed && t.ink?.length) {
+    const u0 = shift + W * from;
+    const u1 = shift + W * to;
+    const slack = 0.35 * em;
+    const own = t.ink.filter((p) => {
+      const mid = (p.u0 + p.u1) / 2;
+      return mid >= u0 - 0.1 * em && mid <= u1 + 0.1 * em && p.u0 >= u0 - slack && p.u1 <= u1 + slack && !(p.onLine && (mid < u0 || mid > u1));
+    });
+    if (own.length) {
+      from = (Math.min(...own.map((p) => p.u0)) - shift) / W;
+      to = (Math.max(...own.map((p) => p.u1)) - shift) / W;
+      // the height of the letters too (lower-case and digits only: not taller than the line)
+      const dx = Math.cos(t.rotation);
+      const dy = Math.sin(t.rotation);
+      const vs = own.flatMap((p) => p.hull.map((q) => -(q.x - t.pos.x) * dy + (q.y - t.pos.y) * dx));
+      lo = Math.max(-0.3 * em, Math.min(...vs));
+      hi = Math.min(1.0 * em, Math.max(...vs));
+      if (hi - lo < 0.45 * em) hi = lo + 0.45 * em;
+    }
+  }
+  const pad = (0.12 * em) / W;
   const tmp: TextEntity = { ...t, pos: layout.pos, align: layout.align };
-  return textCorners(tmp, Math.max(0, from - pad), Math.min(1, to + pad), layout.width);
+  const c = textCorners(tmp, Math.max(-pad, from - pad), Math.min(1 + pad, to + pad), W);
+  // textCorners spans -0.22 .. 0.8 em; move its long edges to the letters' own
+  const nx = -Math.sin(t.rotation);
+  const ny = Math.cos(t.rotation);
+  const vpad = 0.08 * em;
+  const dLo = lo - vpad + 0.22 * em;
+  const dHi = hi + vpad - 0.8 * em;
+  return [
+    { x: c[0].x + nx * dLo, y: c[0].y + ny * dLo },
+    { x: c[1].x + nx * dLo, y: c[1].y + ny * dLo },
+    { x: c[2].x + nx * dHi, y: c[2].y + ny * dHi },
+    { x: c[3].x + nx * dHi, y: c[3].y + ny * dHi },
+  ];
 }
 
 /** A converted text's position after the user moved it with its handle. */
@@ -272,17 +327,34 @@ export function movedPos(t: TextEntity, p: Pt): Pt {
 }
 
 /**
- * How a converted text is written when the user changed its size: the text
- * scaled by `sizeScale`, moved so it stays centred on the original line.
+ * How a converted text is written when the user changed its size or turned
+ * it: the text scaled by `sizeScale`, moved so it stays centred on the
+ * original line, then turned by `turn` about the middle of its letters.
+ * `drawn` (the text written and its alignment) is needed for the turn.
  */
-export function sized(t: TextEntity, pos: Pt): { t: TextEntity; pos: Pt } {
+export function sized(t: TextEntity, pos: Pt, drawn?: { text: string; align: TextEntity['align'] }): { t: TextEntity; pos: Pt } {
   const k = t.sizeScale ?? 1;
-  if (k === 1) return { t, pos };
-  // half the cap height: the middle of the letters stays where it was
-  const shift = -(k - 1) * 0.36 * t.fontSize;
+  let out = { t, pos };
+  if (k !== 1) {
+    // half the cap height: the middle of the letters stays where it was
+    const shift = -(k - 1) * 0.36 * t.fontSize;
+    out = {
+      t: { ...t, fontSize: t.fontSize * k, width: t.width * k },
+      pos: { x: pos.x - Math.sin(t.rotation) * shift, y: pos.y + Math.cos(t.rotation) * shift },
+    };
+  }
+  const turn = t.turn ?? 0;
+  if (!turn || !drawn) return out;
+  // the middle of the letters, in the text's own frame from its anchor
+  const w = textAdvance(out.t, drawn.text);
+  const mu = (drawn.align === 'center' ? 0 : drawn.align === 'right' ? -w / 2 : w / 2);
+  const mv = 0.36 * out.t.fontSize;
+  const r0 = out.t.rotation;
+  const r1 = r0 + turn;
+  const c = { x: out.pos.x + Math.cos(r0) * mu - Math.sin(r0) * mv, y: out.pos.y + Math.sin(r0) * mu + Math.cos(r0) * mv };
   return {
-    t: { ...t, fontSize: t.fontSize * k, width: t.width * k },
-    pos: { x: pos.x - Math.sin(t.rotation) * shift, y: pos.y + Math.cos(t.rotation) * shift },
+    t: { ...out.t, rotation: r1 },
+    pos: { x: c.x - (Math.cos(r1) * mu - Math.sin(r1) * mv), y: c.y - (Math.sin(r1) * mu + Math.cos(r1) * mv) },
   };
 }
 
@@ -327,7 +399,12 @@ function handleSvg(t: TextEntity, drawn: { text: string; pos: Pt; align: TextEnt
 }
 
 /** Dynamic part: texts that hold dimensions, plus the clickable highlight boxes. */
-export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighlights: boolean): { texts: string; overlays: string } {
+/**
+ * `pageShown`: the page is drawn as rendered (a PDF or an image), so every
+ * original text stays on screen and a converted value is written over a white
+ * patch, whatever kind of text it was (real text, outlines or pixels).
+ */
+export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighlights: boolean, pageShown = false): { texts: string; overlays: string } {
   const byText = new Map<string, Dimension[]>();
   for (const dim of dims) {
     let l = byText.get(dim.textId);
@@ -337,6 +414,7 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
   const texts: string[] = [];
   const overlays: string[] = [];
   const handles: string[] = [];
+  const lit = isPaper(d);
   for (const e of d.entities) {
     if (e.kind !== 'text') continue;
     const list = byText.get(e.id);
@@ -344,7 +422,7 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
     const layout = layoutText(e, list);
     let drawn: { text: string; pos: Pt; align: TextEntity['align'] } | null = null;
     const area: Pt[] = [];
-    if (e.ocr) {
+    if (e.ocr || pageShown) {
       const patch = ocrPatch(e, list);
       if (patch) {
         // the white-out stays over the original; only the new text moves
@@ -356,12 +434,12 @@ export function renderDimensionLayer(d: Drawing, dims: Dimension[], showHighligh
       }
     } else if (layout.display.changed) {
       drawn = { text: layout.text, pos: movedPos(e, layout.pos), align: layout.align };
-    } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, ''));
+    } else texts.push(textSvg(e, layout.text, layout.pos, layout.align, '', lit));
     // the converted text, at the size the user chose
-    const sz = drawn ? sized(e, drawn.pos) : null;
+    const sz = drawn ? sized(e, drawn.pos, drawn) : null;
     if (drawn && sz) {
       drawn.pos = sz.pos;
-      texts.push(textSvg(sz.t, drawn.text, drawn.pos, drawn.align, 'converted'));
+      texts.push(textSvg(sz.t, drawn.text, drawn.pos, drawn.align, 'converted', lit));
     }
     for (const dim of list) {
       // a box the user drew stays the box they drew

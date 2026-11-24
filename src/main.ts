@@ -1,9 +1,9 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, type Dimension } from './dimensions';
+import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, settingsFor, type Dimension } from './dimensions';
 import { addBoxedText, boxPoly, outlineFrame, polyArea, textFromBox, textFromPlacement, type Placement } from './boxes';
-import { apply, invert, type Mat } from './geom';
+import { apply, invert, pointInPoly, textCorners, type Mat } from './geom';
 import { measureInk, pageToImage, renderPageImage } from './ink';
 import { DxfPatchError, patchDxf } from './export/dxfPatch';
 import { writeDxfR12 } from './export/dxfR12';
@@ -11,13 +11,17 @@ import { exportPdfPages, exportPdfPlot } from './export/pdf';
 import { importDwg } from './importers/dwg';
 import { importDxf } from './importers/dxf';
 import { importPdf, type PdfJs, type TextStyleHint } from './importers/pdf';
+import { IMAGE_EXTENSIONS, imageToPdf, pdfToImage } from './importers/image';
 import type { Box, Drawing, Entity, LengthUnit, Pt, TextEntity } from './model';
 import { dimPolygon, layoutText, renderDimensionLayer, renderGeometry } from './render/svg';
+import { PageBackground } from './render/page';
 import { matchFonts, normaliseOcrText, placeFit, placeLine, preprocessPage, type PreprocessResult } from './ocr/preprocess';
 import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, type Face } from './fonts/faces';
 import { canvasRenderer } from './fonts/match';
 import { fixDiameters } from './ocr/diameter';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
+import { LANGUAGES, languageName, NeedsOnline, translate } from './translate';
+import { webScriptFont } from './fonts/script';
 import { DEFAULT_SETTINGS, formatCustom, formatLength, parseFactor, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -39,6 +43,30 @@ const svg = $('svg') as unknown as SVGSVGElement;
 const geomLayer = document.getElementById('geom') as unknown as SVGGElement;
 const dimTextLayer = document.getElementById('dimtexts') as unknown as SVGGElement;
 const overlayLayer = document.getElementById('overlays') as unknown as SVGGElement;
+/** The PDF page (or image) as rendered, behind the converted values. */
+const pageBg = new PageBackground($<HTMLCanvasElement>('page-bg'));
+/** The pdf.js document the page background is rendered from. */
+let bgDoc: { destroy(): Promise<void> } | null = null;
+
+/** Shows the page of a PDF drawing as rendered; a DXF or DWG is drawn from its shapes. */
+async function showPageBackground(d: Drawing): Promise<void> {
+  const old = bgDoc;
+  bgDoc = null;
+  pageBg.clear();
+  void old?.destroy();
+  if (!d.pdf) return;
+  try {
+    const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
+    bgDoc = task;
+    const doc = await task.promise;
+    const page = await doc.getPage(d.pdf.pageIndex + 1);
+    await pageBg.show(page as never, d.pdf.userToDrawing);
+  } catch (err) {
+    // the shapes read from the PDF are drawn instead
+    console.warn('The page could not be rendered; showing the shapes read from it.', err);
+    pageBg.clear();
+  }
+}
 
 // ------------------------------------------------------------------ state
 
@@ -166,7 +194,7 @@ function download(data: Uint8Array | string, name: string, type: string): void {
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
 
-const baseName = () => (state.drawing?.name ?? 'drawing').replace(/\.(pdf|dxf|dwg)$/i, '');
+const baseName = () => (state.drawing?.name ?? 'drawing').replace(/\.(pdf|dxf|dwg|png|jpe?g|webp|bmp|gif)$/i, '');
 
 async function encodeImage(img: any): Promise<string> {
   const w = img.width;
@@ -233,10 +261,16 @@ function savePage(): void {
   pageCache.set(d.pdf.pageIndex, { drawing: d, dims: state.dims, used: state.used, sourceUnit: state.sourceUnit, undo: [...undoStack], view: { ...view } });
 }
 
+/** The picture the open drawing came from, put on a PDF page (see importers/image.ts). */
+let picture: Drawing['picture'];
+
 async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void> {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (!['pdf', 'dxf', 'dwg'].includes(ext ?? '')) {
-    toast('Please choose a .pdf, .dxf or .dwg file.', true);
+  const rawExt = file.name.split('.').pop()?.toLowerCase() ?? '';
+  const isPicture = IMAGE_EXTENSIONS.includes(rawExt) || /^image\/(png|jpeg|webp|bmp|gif)$/.test(file.type);
+  // a picture is read like a scanned one-page PDF
+  const ext = isPicture ? 'pdf' : rawExt;
+  if (!['pdf', 'dxf', 'dwg'].includes(ext)) {
+    toast('Please choose a PDF, DXF, DWG, PNG or JPEG file.', true);
     return;
   }
   const samePdf = ext === 'pdf' && file === state.file && !fresh;
@@ -252,18 +286,32 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
     state.dims = cached.dims;
     state.used = cached.used;
     state.sourceUnit = cached.sourceUnit;
+    busy('Drawing the page…');
+    await showPageBackground(cached.drawing);
+    busy(null);
     afterLoad({ undo: cached.undo, view: cached.view });
     return;
   }
   busy(ext === 'dwg' ? 'Reading DWG (the DWG reader is about 11 MB and loads once)…' : 'Reading drawing…');
   try {
-    const bytes = docBytes ?? new Uint8Array(await file.arrayBuffer());
+    let bytes = docBytes ?? new Uint8Array(await file.arrayBuffer());
+    let pictureNote = '';
+    if (isPicture && !docBytes) {
+      busy('Reading the picture…');
+      const pic = await imageToPdf(file, bytes);
+      bytes = pic.bytes;
+      picture = { mime: pic.mime, width: pic.width, height: pic.height, dpi: pic.dpi };
+      pictureNote = pic.assumedDpi
+        ? `The picture does not say its resolution; ${Math.round(pic.dpi)} dpi was assumed (this only sets the paper size of PDF and DXF downloads).`
+        : '';
+    } else if (!isPicture && !samePdf) picture = undefined;
     let d: Drawing;
     let ocrNote = '';
     let pdfBytes = bytes;
     let textStyles: TextStyleHint[] | undefined;
     let pageImage: PreprocessResult['image'];
-    if (ext === 'pdf' && ocrOn()) {
+    // a picture holds no text of its own: it is always scanned
+    if (ext === 'pdf' && (ocrOn() || isPicture)) {
       // Scan & OCR first: text drawn as outlines or scanned becomes real text
       const res = await ocrPdf(bytes, pageIndex);
       pdfBytes = res.bytes;
@@ -277,13 +325,15 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
         : res.alreadyText
           ? 'Scan & OCR: all text on this page was already real text, nothing was added.'
           : 'Scan & OCR found no text on this page.';
-      if (res.unsupported) ocrNote += ` ${res.unsupported} line${res.unsupported === 1 ? '' : 's'} in a script the PDF font cannot hold (for example Chinese) stayed as drawn.`;
+      if (res.unsupported) ocrNote += ` ${res.unsupported} line${res.unsupported === 1 ? ' is' : 's are'} in another script (for example Chinese): ${res.unsupported === 1 ? 'its' : 'their'} values are found, and "+ Add box" around the text reads or translates it.`;
       busy('Reading drawing…');
     }
     if (ext === 'pdf') d = await importPdf(pdfjs as unknown as PdfJs, pdfBytes, file.name, { pageIndex, encodeImage, docParams: PDF_PARAMS, textStyles });
     else if (ext === 'dxf') d = importDxf(bytes, file.name);
     else d = await importDwg(bytes, file.name);
     if (ocrNote) d.warnings.unshift(ocrNote);
+    if (pictureNote) d.warnings.push(pictureNote);
+    if (isPicture && picture) d.picture = picture;
     // where each letter is on the page, so a conversion whites out only the letters it replaces
     if (d.pdf) {
       busy('Measuring the text…');
@@ -299,6 +349,8 @@ async function openFile(file: File, pageIndex = 0, fresh = false): Promise<void>
     state.dims = detectDimensions(d, { customSuffix: customSuffix() });
     state.used = new Map();
     state.sourceUnit = d.detectedDimensionUnit;
+    busy('Drawing the page…');
+    await showPageBackground(d);
     afterLoad();
   } catch (err) {
     console.error(err);
@@ -327,6 +379,10 @@ function afterLoad(restore?: { undo: Snapshot[]; view: { x: number; y: number; w
   $('source-hint').textContent =
     `Used for values written without a unit (detected ${d.source === 'pdf' ? "from the drawing's notes" : "from the file's settings"}: ${d.detectedDimensionUnit}). Values like "381 mm" keep their own unit.`;
   for (const id of ['export-dxf', 'export-pdf', 'convert-all', 'reset-all']) $<HTMLButtonElement>(id).disabled = false;
+  // a picture downloads as a picture too
+  $('export-image').hidden = !d.picture;
+  $<HTMLButtonElement>('export-image').disabled = !d.picture;
+  if (d.picture) $('export-image').textContent = d.picture.mime === 'image/jpeg' ? 'JPEG' : 'PNG';
   $<HTMLButtonElement>('export-dxf12').disabled = d.source === 'pdf';
   $('export-dxf12').hidden = d.source === 'pdf';
   $('export-dxf').title = d.source === 'pdf' ? 'DXF (R12) with the recognised lines, arcs, circles, text and blocks' : 'DXF: the original file with only the converted texts changed';
@@ -352,13 +408,14 @@ function textIdsWithDims(): Set<string> {
 
 function renderStatic(): void {
   if (!state.drawing) return;
-  geomLayer.innerHTML = renderGeometry(state.drawing, textIdsWithDims());
+  // the page as rendered shows everything; the shapes read from it are not drawn again
+  geomLayer.innerHTML = pageBg.active ? '' : renderGeometry(state.drawing, textIdsWithDims());
 }
 
 /** Converted texts, white-outs, highlight boxes and move handles. */
 function renderLayer(): void {
   if (!state.drawing) return;
-  const { texts, overlays } = renderDimensionLayer(state.drawing, state.dims, state.highlight);
+  const { texts, overlays } = renderDimensionLayer(state.drawing, state.dims, state.highlight, pageBg.active);
   dimTextLayer.innerHTML = texts;
   overlayLayer.innerHTML = overlays;
   updateHandles();
@@ -425,8 +482,9 @@ function renderList(): void {
       `<button class="expand" title="Edit this dimension" aria-label="Edit this dimension" aria-expanded="${open}"></button>` +
       `<button class="remove" title="Remove this box" aria-label="Remove this box">×</button></div>` +
       (open ? editPanel(d, t) : '');
-    if (t?.manual) li.classList.add('manual');
-    if (d.override || t?.offset || (t?.sizeScale ?? 1) !== 1) li.classList.add('edited');
+    if (t?.manual && !d.translated) li.classList.add('manual');
+    if (d.translated) li.classList.add('translated');
+    if (d.override || t?.offset || (t?.sizeScale ?? 1) !== 1 || t?.turn) li.classList.add('edited');
     if (open) li.classList.add('open');
     // the diameter sign belongs to the value, even though only the number is replaced
     const sign = t ? (diameterSignBefore(t.text, d.start)?.sign.trim() ?? '') : '';
@@ -455,18 +513,61 @@ function editPanel(d: Dimension, t: TextEntity | undefined): string {
   // ticked when the converted value has the sign: the drawing's own, or one the user added
   const dia = o.diameter ?? (!!t && hasDiameterSign(d, t.text));
   const size = t?.sizeScale ?? 1;
+  const turnDeg = Math.round(((t?.turn ?? 0) * 180) / Math.PI);
+  const eff = settingsFor(d, state.used.get(d.id) ?? state.settings);
+  const frac = eff.target === 'in-frac' || eff.target === 'ft-in';
+  const dec = eff.decimals;
+  const den = eff.denominator;
+  const foundUnit = d.unit ? `As written (${d.unit})` : d.suffix !== undefined ? `As written (${d.suffix.trim()})` : `Original unit (${state.sourceUnit})`;
   return (
     `<div class="dim-edit">` +
-    `<label class="e-field e-wide"><span>Converted text</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
+    `<label class="e-field e-wide"><span>${d.translated ? 'Translation' : 'Converted text'}</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
     `<div class="e-size e-wide"><span>Text size</span>` +
     `<button type="button" class="btn small e-size-dn" title="Smaller" aria-label="Smaller text"${size <= SIZE_MIN ? ' disabled' : ''}>−</button>` +
     `<span class="e-size-val">${Math.round(size * 100)}%</span>` +
     `<button type="button" class="btn small e-size-up" title="Larger" aria-label="Larger text"${size >= SIZE_MAX ? ' disabled' : ''}>+</button></div>` +
-    `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>` +
+    `<div class="e-size e-wide"><span>Rotation</span>` +
+    `<button type="button" class="btn small e-turn" data-step="90" title="Turn 90° anticlockwise" aria-label="Turn 90 degrees anticlockwise">⟲</button>` +
+    `<button type="button" class="btn small e-turn" data-step="-15" title="Turn 15° clockwise" aria-label="Turn 15 degrees clockwise">−</button>` +
+    `<input class="e-turn-val" type="number" step="1" min="-180" max="180" value="${turnDeg}" aria-label="Rotation in degrees"/>` +
+    `<button type="button" class="btn small e-turn" data-step="15" title="Turn 15° anticlockwise" aria-label="Turn 15 degrees anticlockwise">+</button>` +
+    `<button type="button" class="btn small e-turn" data-step="-90" title="Turn 90° clockwise" aria-label="Turn 90 degrees clockwise">⟳</button></div>` +
+    (d.translated
+      ? ''
+      : frac
+      ? `<label class="e-field e-wide e-inline"><span>Round to</span><select class="e-den">${[2, 4, 8, 16, 32, 64].map((n) => `<option value="${n}"${n === den ? ' selected' : ''}>1/${n}"</option>`).join('')}</select></label>`
+      : `<div class="e-size e-wide"><span>Decimal places</span>` +
+        `<button type="button" class="btn small e-dec-dn" title="Fewer" aria-label="Fewer decimal places"${dec <= 0 ? ' disabled' : ''}>−</button>` +
+        `<span class="e-size-val">${dec}</span>` +
+        `<button type="button" class="btn small e-dec-up" title="More" aria-label="More decimal places"${dec >= 6 ? ' disabled' : ''}>+</button></div>`) +
+    (d.translated
+      ? ''
+      : `<label class="e-field e-wide e-inline"><span>Written in</span><select class="e-unit">` +
+        `<option value="">${esc(foundUnit)}</option>` +
+        (['mm', 'cm', 'm', 'in', 'ft'] as LengthUnit[]).map((u) => `<option value="${u}"${o.unit === u ? ' selected' : ''}>${UNIT_NAMES[u]}</option>`).join('') +
+        `</select></label>` +
+        `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>`) +
     `<div class="e-actions">${t?.offset ? '<button class="btn small e-moveback">Move text back</button>' : ''}` +
-    `${d.override || size !== 1 ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
+    `${d.override || size !== 1 || t?.turn ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
     `</div>`
   );
+}
+
+const UNIT_NAMES: Record<LengthUnit, string> = { mm: 'Millimetres (mm)', cm: 'Centimetres (cm)', m: 'Metres (m)', in: 'Inches (in)', ft: 'Feet (ft)' };
+const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/** Turns the converted text of dimension `id` to `deg` degrees (or by `step`), and converts it if it is not yet. */
+function setTurn(id: string, deg: number | null, step = 0): void {
+  const d = state.dims.find((x) => x.id === id);
+  const t = d && textOf(d.textId);
+  if (!d || !t) return;
+  let v = deg ?? Math.round(((t.turn ?? 0) * 180) / Math.PI) + step;
+  if (!Number.isFinite(v)) return;
+  v = ((((v + 180) % 360) + 360) % 360) - 180; // -180 .. 179
+  snapshot();
+  t.turn = v ? (v * Math.PI) / 180 : undefined;
+  if (!d.converted) convert(d, state.settings);
+  renderDynamic();
 }
 
 /** Text size steps in the dimension list (10% each, 50% to 300%). */
@@ -508,12 +609,33 @@ $('dim-list').addEventListener('change', (ev) => {
   if (!id) return;
   if (el.classList.contains('e-text')) {
     const v = el.value;
+    if (state.dims.find((x) => x.id === id)?.translated) {
+      // a translation is the text as typed (an empty field keeps it)
+      if (v.trim()) editDimension(id, (o) => (o.text = v));
+      else renderList();
+      return;
+    }
     editDimension(id, (o) => {
       delete o.text;
       // typed text is kept as it is, unless it is what the settings give anyway
       const d = state.dims.find((x) => x.id === id)!;
       const computed = replacementText({ ...d, override: o }, textOf(d.textId)!.text, state.used.get(d.id) ?? state.settings, state.sourceUnit);
       if (v.trim() && v !== computed) o.text = v;
+    });
+  } else if (el.classList.contains('e-turn-val')) {
+    setTurn(id, Number(el.value));
+  } else if (el.classList.contains('e-den')) {
+    const n = Number(el.value);
+    const d = state.dims.find((x) => x.id === id)!;
+    editDimension(id, (o) => {
+      if (n === (state.used.get(d.id) ?? state.settings).denominator) delete o.denominator;
+      else o.denominator = n;
+    });
+  } else if (el.classList.contains('e-unit')) {
+    const u = el.value as LengthUnit | '';
+    editDimension(id, (o) => {
+      if (u) o.unit = u;
+      else delete o.unit;
     });
   } else if (el.classList.contains('e-dia')) {
     const on = (el as HTMLInputElement).checked;
@@ -561,6 +683,7 @@ function applyView(): void {
   const unitsPerPx = Math.max(view.w / px, view.h / py);
   svg.style.setProperty('--hair', `${unitsPerPx}px`);
   svg.style.setProperty('--hairn', String(unitsPerPx));
+  pageBg.draw(view, px, py);
 }
 
 function fit(): void {
@@ -870,13 +993,32 @@ $('dim-list').addEventListener('click', (ev) => {
     stepSize(id, target.closest('.e-size-up') ? 1 : -1);
     return;
   }
+  const turnBtn = target.closest<HTMLElement>('.e-turn');
+  if (turnBtn) {
+    setTurn(id, null, Number(turnBtn.dataset.step));
+    return;
+  }
+  if (target.closest('.e-dec-up, .e-dec-dn')) {
+    const d = state.dims.find((x) => x.id === id)!;
+    const cur = settingsFor(d, state.used.get(d.id) ?? state.settings).decimals;
+    const next = Math.max(0, Math.min(6, cur + (target.closest('.e-dec-up') ? 1 : -1)));
+    editDimension(id, (o) => {
+      if (next === (state.used.get(d.id) ?? state.settings).decimals) delete o.decimals;
+      else o.decimals = next;
+    });
+    return;
+  }
   if (target.closest('.e-reset')) {
     const t = textOf(state.dims.find((x) => x.id === id)?.textId ?? '');
     // editDimension takes the undo snapshot before calling this
+    const isTr = !!state.dims.find((x) => x.id === id)?.translated;
     editDimension(id, (o) => {
-      delete o.text;
-      delete o.diameter;
-      if (t) t.sizeScale = undefined;
+      // a translation keeps its text: Reset undoes the size, turn and position only
+      for (const k of Object.keys(o)) if (!(isTr && (k === 'text' || k === 'lang'))) delete o[k as keyof typeof o];
+      if (t) {
+        t.sizeScale = undefined;
+        t.turn = undefined;
+      }
     });
     return;
   }
@@ -921,14 +1063,14 @@ interface Snapshot {
   dims: Dimension[];
   used: Map<string, ConversionSettings>;
   /** Where converted texts had been moved to, and their size. */
-  offsets: Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined }>;
+  offsets: Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined; turn: number | undefined }>;
 }
 const undoStack: Snapshot[] = [];
 function snapshot(): void {
   const d = state.drawing;
   if (!d) return;
-  const offsets = new Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined }>();
-  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, { offset: e.offset, sizeScale: e.sizeScale });
+  const offsets = new Map<TextEntity, { offset: Pt | undefined; sizeScale: number | undefined; turn: number | undefined }>();
+  for (const e of d.entities) if (e.kind === 'text') offsets.set(e, { offset: e.offset, sizeScale: e.sizeScale, turn: e.turn });
   undoStack.push({ entities: [...d.entities], dims: state.dims.map((x) => ({ ...x })), used: new Map(state.used), offsets });
   if (undoStack.length > 50) undoStack.shift();
 }
@@ -939,6 +1081,7 @@ function undo(): void {
   for (const [t, o] of s.offsets) {
     t.offset = o.offset;
     t.sizeScale = o.sizeScale;
+    t.turn = o.turn;
   }
   d.entities = s.entities;
   state.dims = s.dims;
@@ -1047,8 +1190,98 @@ function maskOutside(img: ImageData, outline: { x: number; y: number }[], grow: 
   for (let k = 0; k < W * H; k++) if (!keep[k]) px[k * 4] = px[k * 4 + 1] = px[k * 4 + 2] = 255;
 }
 
+interface BoxRead {
+  /** The line best read as a value (for converting). */
+  text: string;
+  /** Everything read in the box, line by line (for translating). */
+  allText: string;
+  placement: Placement;
+  color: string;
+  style?: BoxStyle;
+}
+
+/**
+ * Text the file itself holds inside a region: real PDF text, the Scan & OCR
+ * text layer, DXF/DWG text. In reading order (top line first).
+ */
+function fileTextIn(d: Drawing, poly: Pt[]): TextEntity[] {
+  const inside = d.entities.filter((e): e is TextEntity => {
+    if (e.kind !== 'text' || e.manual) return false;
+    const c = textCorners(e);
+    const mid = { x: (c[0].x + c[2].x) / 2, y: (c[0].y + c[2].y) / 2 };
+    return pointInPoly(mid, poly);
+  });
+  // top to bottom along the box's "up", then along the line
+  const ang = Math.atan2(poly[1].y - poly[0].y, poly[1].x - poly[0].x);
+  const along = (p: Pt) => p.x * Math.cos(ang) + p.y * Math.sin(ang);
+  const up = (p: Pt) => -p.x * Math.sin(ang) + p.y * Math.cos(ang);
+  return inside.sort((a, b) => up(b.pos) - up(a.pos) > a.fontSize * 0.5 ? 1 : up(a.pos) - up(b.pos) > a.fontSize * 0.5 ? -1 : along(a.pos) - along(b.pos));
+}
+
+/** A box read from the text the file holds there (no OCR). */
+function readFileText(d: Drawing, poly: Pt[]): BoxRead | null {
+  const found = fileTextIn(d, poly);
+  if (!found.length) return null;
+  const first = found[0];
+  const allText = found.map((t) => t.text).join('\n');
+  const suffix = customSuffix();
+  const best = found.find((t) => findLengthTokens(t.text, { isDimension: true, customSuffix: suffix }).length) ?? first;
+  const dir = { x: Math.cos(best.rotation), y: Math.sin(best.rotation) };
+  const shift = best.align === 'center' ? -best.width / 2 : best.align === 'right' ? -best.width : 0;
+  return {
+    text: best.text,
+    allText,
+    placement: {
+      origin: { x: best.pos.x + dir.x * shift, y: best.pos.y + dir.y * shift },
+      across: { x: dir.x * best.width, y: dir.y * best.width },
+      up: { x: -dir.y * best.fontSize, y: dir.x * best.fontSize },
+    },
+    color: best.style.color,
+    style: { face: best.face, hscale: best.hscale, slant: best.slant },
+  };
+}
+
+/** OCR lines of one box, without the repeated readings of the same words, in reading order. */
+function distinctLines(lines: FoundLine[]): FoundLine[] {
+  const kept: FoundLine[] = [];
+  for (const l of [...lines].sort((a, b) => b.confidence - a.confidence)) {
+    const overlaps = kept.some((k) => {
+      // centres within each other's box
+      const inK = Math.abs((l.c.x - k.c.x) * k.u.x + (l.c.y - k.c.y) * k.u.y) < k.len / 2 && Math.abs(-(l.c.x - k.c.x) * k.u.y + (l.c.y - k.c.y) * k.u.x) < k.hgt / 2;
+      const kInL = Math.abs((k.c.x - l.c.x) * l.u.x + (k.c.y - l.c.y) * l.u.y) < l.len / 2 && Math.abs(-(k.c.x - l.c.x) * l.u.y + (k.c.y - l.c.y) * l.u.x) < l.hgt / 2;
+      return inK || kInL;
+    });
+    if (!overlaps) kept.push(l);
+  }
+  // image y is down: top line first; within a line, along its direction
+  return kept.sort((a, b) => (Math.abs(a.c.y - b.c.y) > Math.min(a.hgt, b.hgt) * 0.5 ? a.c.y - b.c.y : a.c.x - b.c.x));
+}
+
+/**
+ * The text in a box: read with OCR on the rendered page (any script the
+ * recogniser knows, Chinese and Japanese included), and from the text the
+ * file holds there. Null when nothing could be read.
+ */
+async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRead | null> {
+  const fromFile = readFileText(d, outline ?? poly);
+  if (!d.pdf) return fromFile;
+  let ocr: BoxRead | null = null;
+  try {
+    ocr = await ocrBoxText(d, poly, outline);
+  } catch (err) {
+    console.warn(err);
+  }
+  if (!ocr) return fromFile;
+  if (!fromFile) return ocr;
+  // Real text is exact; the OCR reading gives the look of the letters. A text
+  // layer (OCR) was read at page scale: the box reading is closer.
+  const real = fileTextIn(d, outline ?? poly).filter((t) => !t.ocr);
+  if (!real.length) return ocr;
+  return { ...ocr, text: fromFile.text, allText: fromFile.allText, placement: fromFile.placement };
+}
+
 /** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
-async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<{ text: string; placement: Placement; color: string; style?: BoxStyle } | null> {
+async function ocrBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRead | null> {
   if (!d.pdf) return null;
   const toUser = invert(d.pdf.userToDrawing);
   const task = pdfjs.getDocument({ data: d.pdf.bytes.slice(), ...PDF_PARAMS });
@@ -1122,8 +1355,13 @@ async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<{ te
     }
     const pl = fit ? placeFit(fit, map) : placeLine(best.l, map);
     const hex = '#' + best.l.rgb.map((v) => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+    const allText = distinctLines(lines)
+      .map((l) => normaliseOcrText(l.text) ?? l.text.trim())
+      .filter(Boolean)
+      .join('\n');
     return {
       text: best.text,
+      allText: allText || best.text,
       placement: { origin: { x: pl.origin[0], y: pl.origin[1] }, across: { x: pl.across[0], y: pl.across[1] }, up: { x: pl.up[0], y: pl.up[1] } },
       color: hex,
       style: fit ? { face: fit.face, hscale: fit.hscale, slant: fit.slant } : pageStyle(d),
@@ -1133,13 +1371,46 @@ async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<{ te
   }
 }
 
-/** Asks the user to confirm or type the text of a box. Resolves null on cancel. */
-function askBoxText(read: string | null): Promise<string | null> {
+type BoxAnswer = { action: 'convert'; text: string } | { action: 'translate'; source: string; translation: string; lang: string };
+
+const TR_ONLINE_KEY = 'duc.translate.online.v1';
+const TR_TO_KEY = 'duc.translate.to.v1';
+{
+  const opts = LANGUAGES.map(([c, n]) => `<option value="${c}">${n}</option>`).join('');
+  $('tr-from').innerHTML = `<option value="">Detect automatically</option>${opts}`;
+  $('tr-to').innerHTML = opts;
+  const nav = (navigator.language || 'en').toLowerCase();
+  const pref = localStorage.getItem(TR_TO_KEY) ?? (LANGUAGES.find(([c]) => c.toLowerCase() === nav) ?? LANGUAGES.find(([c]) => nav.startsWith(c.split('-')[0])) ?? ['en'])[0];
+  $<HTMLSelectElement>('tr-to').value = pref;
+  $<HTMLInputElement>('tr-online').checked = localStorage.getItem(TR_ONLINE_KEY) === 'on';
+  $('tr-online').addEventListener('change', () => localStorage.setItem(TR_ONLINE_KEY, $<HTMLInputElement>('tr-online').checked ? 'on' : 'off'));
+  $('tr-to').addEventListener('change', () => localStorage.setItem(TR_TO_KEY, $<HTMLSelectElement>('tr-to').value));
+}
+
+/**
+ * Shows what was read in a box. "Add box" converts the values in it;
+ * "Translate…" opens a translation of the text, which can be written on the
+ * drawing instead. Resolves null on cancel.
+ */
+function askBoxText(read: BoxRead | null): Promise<BoxAnswer | null> {
   const dlg = $<HTMLDialogElement>('box-dialog');
   const input = $<HTMLInputElement>('box-text');
+  const src = $<HTMLTextAreaElement>('tr-src');
+  const out = $<HTMLTextAreaElement>('tr-out');
+  const status = $('tr-status');
+  const panel = $('tr-panel');
+  const useTr = $<HTMLButtonElement>('box-use-tr');
   $('box-read').textContent =
-    read === null ? 'Nothing could be read in the box. Type the value as it appears on the drawing.' : 'Read from the drawing. Correct it if needed.';
-  input.value = read ?? '';
+    read === null ? 'Nothing could be read in the box. Type what it says.' : 'Read from the drawing. Correct it if needed.';
+  input.value = read?.text.replace(/\s*\n\s*/g, ' ') ?? '';
+  src.value = read?.allText ?? read?.text ?? '';
+  out.value = '';
+  status.textContent = '';
+  panel.hidden = true;
+  useTr.hidden = true;
+  // text in another script: offer the translation straight away
+  const foreign = /[^\u0000-\u024f\u2000-\u22ff\u00b0\u00d8\u00f8\u2300\u2205]/.test(src.value);
+  $('box-translate').classList.toggle('primary', foreign);
   // Ø is not on most keyboards
   $('box-dia').onclick = () => {
     const a = input.selectionStart ?? input.value.length;
@@ -1148,6 +1419,38 @@ function askBoxText(read: string | null): Promise<string | null> {
     input.focus();
     input.setSelectionRange(a + 1, a + 1);
   };
+  let detected = '';
+  const run = async () => {
+    const text = src.value.trim();
+    if (!text) {
+      status.textContent = 'There is no text to translate. Type it above.';
+      return;
+    }
+    const to = $<HTMLSelectElement>('tr-to').value;
+    status.textContent = 'Translating…';
+    $<HTMLButtonElement>('tr-go').disabled = true;
+    try {
+      const res = await translate(text, $<HTMLSelectElement>('tr-from').value, to, $<HTMLInputElement>('tr-online').checked, (m) => (status.textContent = m));
+      out.value = res.text;
+      detected = res.from;
+      status.textContent = `${res.from ? `From ${languageName(res.from)}. ` : ''}Translated by ${res.engine}. Check it, then press "Write translation".`;
+      useTr.hidden = false;
+    } catch (err) {
+      status.textContent =
+        err instanceof NeedsOnline
+          ? `${err.message} Tick the box above to use an online translator, or type the translation yourself.`
+          : (err as Error).message;
+      useTr.hidden = !out.value.trim();
+    } finally {
+      $<HTMLButtonElement>('tr-go').disabled = false;
+    }
+  };
+  $('box-translate').onclick = () => {
+    panel.hidden = false;
+    void run();
+  };
+  $('tr-go').onclick = () => void run();
+  out.oninput = () => (useTr.hidden = !out.value.trim());
   // Enter means "Add box" (the form's first button is Cancel)
   input.onkeydown = (ev) => {
     if (ev.key === 'Enter') {
@@ -1160,7 +1463,12 @@ function askBoxText(read: string | null): Promise<string | null> {
   input.focus();
   input.select();
   return new Promise((resolve) => {
-    dlg.onclose = () => resolve(dlg.returnValue === 'ok' && input.value.trim() ? input.value.trim() : null);
+    dlg.onclose = () => {
+      if (dlg.returnValue === 'translation' && out.value.trim()) {
+        resolve({ action: 'translate', source: src.value.trim() || input.value.trim(), translation: out.value.trim(), lang: $<HTMLSelectElement>('tr-to').value || detected });
+      } else if (dlg.returnValue === 'ok' && input.value.trim()) resolve({ action: 'convert', text: input.value.trim() });
+      else resolve(null);
+    };
   });
 }
 
@@ -1192,10 +1500,14 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
       busy(null);
     }
   }
-  const typed = await askBoxText(read?.text ?? null);
-  if (typed === null) return;
+  const answer = await askBoxText(read);
+  if (answer === null) return;
+  if (answer.action === 'translate') {
+    placeTranslation(d, poly, frame, read, answer);
+    return;
+  }
   // AutoCAD's code for the diameter sign, as some users type it
-  const text = typed.replace(/%%c/gi, '\u00d8');
+  const text = answer.text.replace(/%%c/gi, '\u00d8');
   const t = read ? textFromPlacement(text, read.placement, read.color, read.text) : textFromBox(text, frame);
   // written like the letters in the box (or, when none were read, like the page's other text)
   Object.assign(t, read?.style ?? pageStyle(d) ?? {});
@@ -1203,14 +1515,7 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
   const edit = addBoxedText(d, state.dims, poly, t, customSuffix());
   const added = edit.dims.filter((x) => x.textId === t.id);
   if (!added.length) {
-    const c = state.settings.custom;
-    toast(
-      state.settings.target === 'custom' && c.from.trim()
-        ? `"${text}" holds no value in the original unit (${c.from.trim()}). Write it as it appears, for example "12${c.from.trim()}".`
-        : `"${text}" holds no length to convert (angles and counts are left alone). For other units, choose "Custom…" as the new unit.`,
-      true,
-      7000,
-    );
+    toast(`"${text}" holds no number, so there is nothing to convert. Type the value as the drawing shows it, or translate the text instead.`, true, 7000);
     return;
   }
   snapshot();
@@ -1221,8 +1526,74 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
   d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
   renderStatic();
   renderDynamic();
+  // a box goes before the rules: say how a value in an unknown unit was taken
+  const odd = added.filter((x) => x.suffix !== undefined && state.settings.target !== 'custom');
+  const oddNote = odd.length
+    ? ` "${odd[0].original}" has a unit the converter does not know; it is read as ${state.sourceUnit}. Change that under ⌄ "Written in".`
+    : '';
   const replaced = edit.replaced.length ? ` It replaces ${edit.replaced.length} box${edit.replaced.length === 1 ? '' : 'es'} that ${edit.replaced.length === 1 ? 'was' : 'were'} there.` : '';
-  toast(`Added "${added.map((x) => x.original).join('", "')}".${replaced}`, false, 6000, { label: 'Undo', run: undo });
+  toast(`Added "${added.map((x) => x.original).join('", "')}".${replaced}${oddNote}`, false, oddNote ? 9000 : 6000, { label: 'Undo', run: undo });
+}
+
+/**
+ * Writes a translation over a box: the box is whited out and the translated
+ * text written in its place, made smaller if it would not fit. It is listed
+ * with the dimensions, so it can be undone, moved, resized and turned.
+ */
+function placeTranslation(d: Drawing, poly: Pt[], frame: Pt[], read: BoxRead | null, a: Extract<BoxAnswer, { action: 'translate' }>): void {
+  const src = a.source.replace(/\s*\n\s*/g, ' ');
+  // one line across the middle of the box, at the size of the letters read there
+  const t = textFromBox(src, frame, read?.color ?? '#000000');
+  Object.assign(t, read?.style ?? pageStyle(d) ?? {});
+  if (read) t.fontSize = Math.min(t.fontSize, Math.hypot(read.placement.up.x, read.placement.up.y));
+  const dir = { x: Math.cos(t.rotation), y: Math.sin(t.rotation) };
+  const up = { x: -dir.y, y: dir.x };
+  const c = { x: frame.reduce((q, p) => q + p.x, 0) / frame.length, y: frame.reduce((q, p) => q + p.y, 0) / frame.length };
+  const along = frame.map((p) => (p.x - c.x) * dir.x + (p.y - c.y) * dir.y);
+  const half = (Math.max(...along) - Math.min(...along)) / 2;
+  const margin = Math.min(0.3 * t.fontSize, half * 0.1);
+  t.pos = { x: c.x - dir.x * (half - margin) - up.x * 0.36 * t.fontSize, y: c.y - dir.y * (half - margin) - up.y * 0.36 * t.fontSize };
+  // the translation is centred on the text's middle: the middle of the box
+  t.width = 2 * (half - margin);
+  const edit = addBoxedText(d, state.dims, poly, t, customSuffix());
+  // in place of the values found in it: the whole text, translated
+  counterTr += 1;
+  const dim: Dimension = {
+    id: `tr${counterTr}`,
+    textId: t.id,
+    start: 0,
+    end: src.length,
+    value: NaN,
+    unit: null,
+    spaced: false,
+    kind: 'linear',
+    original: src,
+    manual: true,
+    translated: true,
+    override: { text: a.translation, lang: a.lang },
+  };
+  // the box's longer side is the room there is: a longer translation is written smaller
+  const room = 2 * (half - margin);
+  const need = advanceOf(t, a.translation);
+  snapshot();
+  // the text as it is on the drawing (a copy that holds the box's region)
+  const placed = edit.entities.find((e): e is TextEntity => e.kind === 'text' && e.id === t.id);
+  if (placed && need > room * 1.02) placed.sizeScale = Math.max(0.3, Math.floor((room / need) * 20) / 20);
+  d.entities = edit.entities;
+  state.dims = [...edit.dims.filter((x) => x.textId !== t.id), dim];
+  for (const id of edit.replaced) state.used.delete(id);
+  convert(dim, state.settings);
+  d.stats.texts = d.entities.filter((e) => e.kind === 'text').length;
+  renderStatic();
+  renderDynamic();
+  toast(`Wrote the ${languageName(a.lang)} translation over the box.`, false, 6000, { label: 'Undo', run: undo });
+}
+let counterTr = 0;
+
+/** Width of `s` written like text `t`: its face, or an even width per character. */
+function advanceOf(t: TextEntity, s: string): number {
+  if (t.face) return advance(getFace(t.face), s) * t.fontSize * (t.hscale ?? 1);
+  return s.length * t.fontSize * 0.55;
 }
 
 window.addEventListener('keydown', (ev) => {
@@ -1371,8 +1742,8 @@ $('page-next').addEventListener('click', () => turnPage(1));
 $('export-dxf').addEventListener('click', () => {
   const d = state.drawing;
   if (!d) return;
-  const moved = d.entities.some((e) => e.kind === 'text' && (!!e.offset || (e.sizeScale ?? 1) !== 1));
-  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was moved or resized, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
+  const moved = d.entities.some((e) => e.kind === 'text' && (!!e.offset || (e.sizeScale ?? 1) !== 1 || !!e.turn));
+  if (d.source !== 'pdf' && d.dxf?.hasHandles && moved) toast('Converted text was moved, resized or turned, so a simplified DXF R12 was written (the original file can only have its text changed in place).', false, 7000);
   else if (d.source !== 'pdf' && d.dxf?.hasHandles) {
     try {
       download(patchDxf(d, state.dims), `${baseName()}-converted.dxf`, 'application/dxf');
@@ -1391,18 +1762,47 @@ $('export-dxf12').addEventListener('click', () => {
   if (d) download(writeDxfR12(d, state.dims), `${baseName()}-converted-R12.dxf`, 'application/dxf');
 });
 
+/** The converted drawing as a PDF. */
+async function convertedPdf(d: Drawing): Promise<{ bytes: Uint8Array; warnings: string[] }> {
+  if (d.source === 'pdf' && d.pdf) {
+    // every page worked on goes into the one download
+    const pages = [...pageCache.values()].filter((p) => p.drawing.pdf!.pageIndex !== d.pdf!.pageIndex).map((p) => ({ d: p.drawing, dims: p.dims }));
+    pages.push({ d, dims: state.dims });
+    return exportPdfPages(docBytes ?? d.pdf.bytes, pages, fontBytes, webScriptFont);
+  }
+  return exportPdfPlot(d, state.dims, fontBytes);
+}
+
+$('export-image').addEventListener('click', async () => {
+  const d = state.drawing;
+  if (!d?.picture) return;
+  busy('Writing the picture…');
+  try {
+    const res = await convertedPdf(d);
+    const task = pdfjs.getDocument({ data: res.bytes.slice(), ...PDF_PARAMS });
+    try {
+      const page = await (await task.promise).getPage(1);
+      const blob = await pdfToImage(page as never, d.picture.width, d.picture.mime);
+      const jpeg = d.picture.mime === 'image/jpeg';
+      download(new Uint8Array(await blob.arrayBuffer()), `${baseName()}-converted.${jpeg ? 'jpg' : 'png'}`, d.picture.mime);
+    } finally {
+      await task.destroy();
+    }
+    if (res.warnings.length) toast(res.warnings.join(' '), false, 7000);
+  } catch (err) {
+    console.error(err);
+    toast(`Picture export failed: ${(err as Error).message}`, true);
+  } finally {
+    busy(null);
+  }
+});
+
 $('export-pdf').addEventListener('click', async () => {
   const d = state.drawing;
   if (!d) return;
   busy('Writing PDF…');
   try {
-    let res;
-    if (d.source === 'pdf' && d.pdf) {
-      // every page worked on goes into the one download
-      const pages = [...pageCache.values()].filter((p) => p.drawing.pdf!.pageIndex !== d.pdf!.pageIndex).map((p) => ({ d: p.drawing, dims: p.dims }));
-      pages.push({ d, dims: state.dims });
-      res = await exportPdfPages(docBytes ?? d.pdf.bytes, pages, fontBytes);
-    } else res = await exportPdfPlot(d, state.dims, fontBytes);
+    const res = await convertedPdf(d);
     download(res.bytes, `${baseName()}-converted.pdf`, 'application/pdf');
     if (res.warnings.length) toast(res.warnings.join(' '), false, 7000);
   } catch (err) {

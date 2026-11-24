@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Open a PDF, DXF or DWG engineering drawing, click dimensions to convert their units, and download the result as DXF or PDF." />
+    <meta name="description" content="Open a PDF, DXF, DWG, PNG or JPEG engineering drawing, click dimensions to convert their units, and download the result as DXF or PDF." />
     <title>Drawing Unit Converter</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M4 22h24M4 18v8M28 18v8' stroke='%231f6bad' stroke-width='2.5' fill='none'/%3E%3Cpath d='M4 22l5-3v6zM28 22l-5-3v6z' fill='%231f6bad'/%3E%3Ctext x='16' y='14' font-size='11' text-anchor='middle' font-family='Arial' fill='%23222'%3E25.4%3C/text%3E%3C/svg%3E" />
   </head>
@@ -14,7 +14,7 @@
         <span>Drawing Unit Converter</span>
       </div>
       <label class="btn primary" for="file-input">Open drawing…</label>
-      <input id="file-input" type="file" accept=".pdf,.dxf,.dwg,application/pdf" hidden />
+      <input id="file-input" type="file" accept=".pdf,.dxf,.dwg,.png,.jpg,.jpeg,.webp,.bmp,.gif,application/pdf,image/png,image/jpeg,image/webp,image/bmp,image/gif" hidden />
       <span id="file-name" class="file-name"></span>
       <div class="spacer"></div>
       <div class="export" role="group" aria-label="Download">
@@ -22,6 +22,7 @@
         <button id="export-dxf" class="btn" disabled title="DXF">DXF</button>
         <button id="export-dxf12" class="btn" disabled title="Simplified DXF R12: opens in any CAD program">DXF R12</button>
         <button id="export-pdf" class="btn" disabled>PDF</button>
+        <button id="export-image" class="btn" disabled hidden title="The picture with the new values, at its own size">PNG</button>
       </div>
     </header>
 
@@ -30,11 +31,12 @@
         <div id="empty" class="empty">
           <div class="empty-card">
             <h1>Open a drawing</h1>
-            <p>Drop a <b>PDF</b>, <b>DXF</b> or <b>DWG</b> file here, or use <b>Open drawing…</b></p>
+            <p>Drop a <b>PDF</b>, <b>DXF</b>, <b>DWG</b>, <b>PNG</b> or <b>JPEG</b> file here, or use <b>Open drawing…</b></p>
             <p>Then click any highlighted dimension to convert it to the unit chosen on the right.</p>
             <p class="muted"></p>
           </div>
         </div>
+        <canvas id="page-bg" class="page-bg" hidden></canvas>
         <svg id="svg" class="canvas" xmlns="http://www.w3.org/2000/svg" hidden>
           <g id="world" transform="scale(1,-1)">
             <g id="geom"></g>
@@ -164,20 +166,34 @@
         </form>
       </dialog>
     </main>
-    <dialog id="box-dialog" class="dialog">
+    <dialog id="box-dialog" class="dialog box-dialog">
       <form method="dialog">
-        <h3>Add a dimension box</h3>
+        <h3>Add a box</h3>
         <p id="box-read" class="hint"></p>
         <label class="field"><span>Text in the box</span>
           <span class="input-sym">
             <input id="box-text" type="text" autocomplete="off" spellcheck="false" />
             <button type="button" id="box-dia" class="btn small" title="Insert the diameter sign" aria-label="Insert the diameter sign Ø">Ø</button>
+            <button type="button" id="box-translate" class="btn small" title="Translate the text in the box into another language">Translate…</button>
           </span>
         </label>
-        <p class="hint">Include the unit if the drawing shows one, for example <code>88.9</code>, <code>R 25.4mm</code>, <code>Ø12</code> or <code>Dia 22.3mm</code>.</p>
+        <p class="hint" id="box-hint-units">Include the unit if the drawing shows one, for example <code>88.9</code>, <code>R 25.4mm</code>, <code>Ø12</code> or <code>Dia 22.3mm</code>. <b>Add box</b> converts the values in it.</p>
+        <section id="tr-panel" class="tr-panel" hidden>
+          <label class="field"><span>Text to translate</span><textarea id="tr-src" rows="2" spellcheck="false"></textarea></label>
+          <div class="tr-langs">
+            <label class="field"><span>From</span><select id="tr-from"></select></label>
+            <span class="tr-arrow" aria-hidden="true">→</span>
+            <label class="field"><span>To</span><select id="tr-to"></select></label>
+            <button type="button" id="tr-go" class="btn primary">Translate</button>
+          </div>
+          <label class="check"><input type="checkbox" id="tr-online" /> If this browser cannot translate on this device, send the text to an online translator (Google Translate). Only the text in this box is sent.</label>
+          <label class="field"><span>Translation</span><textarea id="tr-out" rows="2" spellcheck="false" placeholder="Press Translate, or type the translation"></textarea></label>
+          <p class="hint" id="tr-status" aria-live="polite"></p>
+        </section>
         <div class="row">
           <button value="cancel" class="btn" formnovalidate>Cancel</button>
-          <button value="ok" class="btn primary">Add box</button>
+          <button value="translation" id="box-use-tr" class="btn" hidden>Write translation</button>
+          <button value="ok" class="btn primary" id="box-ok">Add box</button>
         </div>
       </form>
     </dialog>

@@ -105,14 +105,16 @@ describe('custom unit in boxes the user draws', () => {
   const found = (text: string, suffix?: string) => addBoxedText(empty, [], box, textFromBox(text, box), suffix).dims.map((x) => x.original);
 
   it('finds volts and degrees when they are the original unit', () => {
-    expect(found('120V')).toEqual([]);
+    // a box goes before the rules: without a custom unit, its value is found too
+    expect(found('120V')).toEqual(['120V']);
     expect(found('120V', 'V')).toEqual(['120V']);
     expect(found('480V 3PH 27KW', 'V')).toEqual(['480V']);
-    expect(found('45°')).toEqual([]);
+    expect(found('45°')).toEqual(['45°']);
     expect(found('45°', '°')).toEqual(['45°']);
     expect(found('HOT ZONE 104.0°', '°')).toEqual(['104.0°']);
     expect(found('45 deg', 'deg')).toEqual(['45 deg']);
-    expect(found('3.5 kV', 'V')).toEqual([]);
+    // another unit than the custom one: the usual rules skip it, a box still converts it
+    expect(found('3.5 kV', 'V')).toEqual(['3.5 kV']);
   });
 
   it('reads a degree sign that OCR saw as * or º', () => {

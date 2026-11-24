@@ -1,7 +1,7 @@
 {
   "name": "drawing-unit-converter",
   "version": "0.1.0",
-  "description": "Browser tool that imports engineering drawings (PDF, DXF, DWG), converts dimension units on click, and exports DXF or PDF.",
+  "description": "Browser tool that imports engineering drawings (PDF, DXF, DWG, PNG, JPEG), converts dimension units on click, and exports DXF or PDF.",
   "license": "GPL-3.0-or-later",
   "private": true,
   "type": "module",

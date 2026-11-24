@@ -36,6 +36,7 @@ import { apply, applyVec, bulgeArc, insertMatrix, invert, matScale, mul, normAng
 import type { Drawing, Entity, PathSeg, Pt, Style, TextEntity } from '../model';
 import { coverPolygons, layoutText, movedPos, ocrPatch, sized } from '../render/svg';
 import { faceChar, getFace, type FaceId } from '../fonts/faces';
+import { outlineText, scriptOf, type Script, type ScriptFontLoader, type ShapingFont } from '../fonts/script';
 
 /** Loads a bundled font file (public/fonts) for embedding. */
 export type FontLoader = (id: FaceId) => Promise<Uint8Array>;
@@ -119,6 +120,31 @@ function drawStyled(
   page.pushOperators(popGraphicsState());
 }
 
+/** Writes `text` as filled letter outlines shaped in `font` (no embedded font needed). */
+function drawOutlined(page: PDFPage, font: ShapingFont, text: string, anchor: Pt, dir: Pt, size: number, align: TextEntity['align'], color: ReturnType<typeof rgb>): void {
+  const { ops, advance } = outlineText(font, text);
+  if (!ops.length) return;
+  const len = Math.hypot(dir.x, dir.y) || 1;
+  const c = dir.x / len;
+  const s = dir.y / len;
+  const shift = align === 'center' ? -advance / 2 : align === 'right' ? -advance : 0;
+  const path: Op[] = [];
+  for (const o of ops) {
+    if (o.op === 'M') path.push(moveTo(o.x + shift, o.y));
+    else if (o.op === 'L') path.push(lineTo(o.x + shift, o.y));
+    else if (o.op === 'C') path.push(appendBezierCurve(o.x1 + shift, o.y1, o.x2 + shift, o.y2, o.x + shift, o.y));
+    else path.push(closePath());
+  }
+  page.pushOperators(
+    pushGraphicsState(),
+    concatTransformationMatrix(c * size, s * size, -s * size, c * size, anchor.x, anchor.y),
+    setFillingRgbColor(color.red, color.green, color.blue),
+    ...path,
+    fill(),
+    popGraphicsState(),
+  );
+}
+
 function hexRgb(hex: string) {
   const v = parseInt(hex.replace('#', '').slice(0, 6), 16) || 0;
   return rgb(((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255);
@@ -170,21 +196,45 @@ export async function exportPdfOverlay(d: Drawing, dims: Dimension[], loadFont?:
   return exportPdfPages(d.pdf.bytes, [{ d, dims }], loadFont);
 }
 
+/** The language a converted text is written in, when the user translated it. */
+const langOf = (list: Dimension[]) => list.find((x) => x.override?.lang)?.override?.lang;
+
 /** PDF input with work on several pages: each page gets its converted values. */
-export async function exportPdfPages(bytes: Uint8Array, pages: { d: Drawing; dims: Dimension[] }[], loadFont?: FontLoader): Promise<{ bytes: Uint8Array; warnings: string[] }> {
+export async function exportPdfPages(
+  bytes: Uint8Array,
+  pages: { d: Drawing; dims: Dimension[] }[],
+  loadFont?: FontLoader,
+  loadScript?: ScriptFontLoader,
+): Promise<{ bytes: Uint8Array; warnings: string[] }> {
   const warnings: string[] = [];
   const doc = await PDFDocument.load(bytes, { updateMetadata: false });
   const fonts = await Fonts.create(doc, loadFont);
+  const scripts = new Map<Script, ShapingFont | null>();
   for (const { d, dims } of pages) {
     const ids = new Set(dims.filter((x) => x.converted).map((x) => x.textId));
-    await fonts.prepare(d.entities.filter((e): e is TextEntity => e.kind === 'text' && ids.has(e.id)));
+    const texts = d.entities.filter((e): e is TextEntity => e.kind === 'text' && ids.has(e.id));
+    await fonts.prepare(texts);
+    // writing systems the bundled fonts lack (a translation into Chinese ...)
+    for (const t of texts) {
+      const list = dims.filter((x) => x.textId === t.id);
+      const sc = scriptOf(layoutText(t, list).text, langOf(list));
+      if (!sc || scripts.has(sc)) continue;
+      let f: ShapingFont | null = null;
+      try {
+        f = loadScript ? await loadScript(sc) : null;
+      } catch (err) {
+        console.warn(err);
+      }
+      scripts.set(sc, f);
+      if (!f) warnings.push('The font for some translated text could not be downloaded, so it may show as "?" in the PDF.');
+    }
   }
-  for (const { d, dims } of pages) if (d.pdf) overlayPage(doc.getPage(d.pdf.pageIndex), fonts, d, dims);
+  for (const { d, dims } of pages) if (d.pdf) overlayPage(doc.getPage(d.pdf.pageIndex), fonts, d, dims, scripts);
   const out = await doc.save({ useObjectStreams: false });
   return { bytes: out, warnings };
 }
 
-function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[]): void {
+function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[], scripts = new Map<Script, ShapingFont | null>()): void {
   if (!d.pdf) return;
   const toUser = invert(d.pdf.userToDrawing);
   const scale = matScale(d.pdf.userToDrawing); // mm per PDF unit
@@ -195,23 +245,32 @@ function overlayPage(page: PDFPage, fonts: Fonts, d: Drawing, dims: Dimension[])
     const list = dims.filter((x) => x.textId === t.id);
     const lay = layoutText(t, list);
     const size = t.fontSize / scale;
-    const dirU = applyVec(toUser, { x: Math.cos(t.rotation), y: Math.sin(t.rotation) });
+    const dirOf = (x: TextEntity) => applyVec(toUser, { x: Math.cos(x.rotation), y: Math.sin(x.rotation) });
+    const dirU = dirOf({ ...t, rotation: t.rotation + (t.turn ?? 0) });
     const angle = (Math.atan2(dirU.y, dirU.x) * 180) / Math.PI;
-    const color = hexRgb(displayColor(t.style.color));
+    // a PDF's colours are paper colours: white text stays white
+    const color = hexRgb(t.style.color);
     // only the converted part of the line is whited out and written again
     const patch = ocrPatch(t, list);
     const safe = fonts.forText(t, patch ? patch.text : lay.text);
+    const scriptFont = safe.lossy ? scripts.get(scriptOf(patch ? patch.text : lay.text, langOf(list)) as Script) : null;
 
-    if (patch && !safe.lossy) {
+    if (scriptFont) {
+      // letters no bundled font has: drawn as outlines from a font for that script
+      const part = patch ?? { from: -0.08 * t.fontSize / Math.max(t.width, 1e-9), to: 1 + 0.08 * t.fontSize / Math.max(t.width, 1e-9), text: lay.text, pos: lay.pos, align: lay.align };
+      for (const mask of coverPolygons(t, part)) polygon(page, mask.map((p) => apply(toUser, p)));
+      const sz = sized(t, movedPos(t, part.pos), part);
+      drawOutlined(page, scriptFont, part.text, apply(toUser, sz.pos), dirOf(sz.t), sz.t.fontSize / scale, part.align, color);
+    } else if (patch && !safe.lossy) {
       // white out the old letters (or the whole drawn box) and write the new part
       for (const mask of coverPolygons(t, patch)) polygon(page, mask.map((p) => apply(toUser, p)));
-      const sz = sized(t, movedPos(t, patch.pos));
-      drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirU, sz.t.fontSize / scale, patch.align, color);
+      const sz = sized(t, movedPos(t, patch.pos), patch);
+      drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirOf(sz.t), sz.t.fontSize / scale, patch.align, color);
     } else if (!safe.lossy) {
       const pad = 0.08 * t.fontSize / Math.max(t.width, 1e-9);
       for (const mask of coverPolygons(t, { from: -pad, to: 1 + pad })) polygon(page, mask.map((p) => apply(toUser, p)));
-      const sz = sized(t, movedPos(t, lay.pos));
-      drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirU, sz.t.fontSize / scale, lay.align, color);
+      const sz = sized(t, movedPos(t, lay.pos), lay);
+      drawStyled(page, sz.t, safe, apply(toUser, sz.pos), dirOf(sz.t), sz.t.fontSize / scale, lay.align, color);
     } else {
       const font = fonts.helvetica;
       // The line holds characters Helvetica lacks (CJK ...): replace only the values.
@@ -354,9 +413,9 @@ function plotEntity(ctx: PlotCtx, e: Entity, m: Mat, depth: number): void {
       const lay = dims ? layoutText(e, dims) : { text: e.text, pos: e.pos, align: e.align };
       const safe = ctx.fonts.forText(e, lay.text);
       if (safe.lossy) ctx.lossyText = true;
-      const dir = applyVec(m, { x: Math.cos(e.rotation), y: Math.sin(e.rotation) });
-      // converted text: moved and sized as the user chose
-      const sz = dims ? sized(e, movedPos(e, lay.pos)) : { t: e, pos: lay.pos };
+      // converted text: moved, sized and turned as the user chose
+      const sz = dims ? sized(e, movedPos(e, lay.pos), lay) : { t: e, pos: lay.pos };
+      const dir = applyVec(m, { x: Math.cos(sz.t.rotation), y: Math.sin(sz.t.rotation) });
       const size = sz.t.fontSize * matScale(m);
       if (size < 0.5) break;
       drawStyled(ctx.page, sz.t, safe, apply(m, sz.pos), dir, size, lay.align, hexRgb(displayColor(e.style.color)));

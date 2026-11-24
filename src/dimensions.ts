@@ -35,6 +35,13 @@ export interface LengthToken {
 }
 
 export interface Dimension extends LengthToken {
+  /**
+   * In a box the user drew: the user's choice comes first. It converts in
+   * any case, whatever unit or suffix is written with it.
+   */
+  manual?: boolean;
+  /** A translation of the whole text written over a box (override.text holds it). */
+  translated?: boolean;
   id: string;
   textId: string;
   original: string;
@@ -48,6 +55,27 @@ export interface DimensionOverride {
   text?: string;
   /** Diameter sign in front of the converted value: true = add it, false = take it out. */
   diameter?: boolean;
+  /** Decimal places for this value (instead of the setting). */
+  decimals?: number;
+  /** Fraction rounding for this value (fractional inches, feet and inches). */
+  denominator?: number;
+  /** The unit the value is written in, whatever the drawing or the settings say. */
+  unit?: LengthUnit;
+  /** The language `text` is in, when it is a translation (a code such as "en" or "ja"). */
+  lang?: string;
+}
+
+/** The settings a dimension is converted with: the global ones, with its own decimals or rounding. */
+export function settingsFor(d: Dimension, s: ConversionSettings): ConversionSettings {
+  const o = d.override;
+  if (!o || (o.decimals === undefined && o.denominator === undefined)) return s;
+  return { ...s, ...(o.decimals !== undefined ? { decimals: o.decimals } : {}), ...(o.denominator !== undefined ? { denominator: o.denominator } : {}) };
+}
+
+/** The value as it is to be read: in the unit the user chose for it, if any. */
+export function effectiveToken<T extends LengthToken>(d: T & { override?: DimensionOverride }): T {
+  const u = d.override?.unit;
+  return u ? { ...d, unit: u, suffix: undefined } : d;
 }
 
 /** A diameter sign (and one space) right before position `at` of `text`, or null. */
@@ -301,6 +329,38 @@ export function findLengthTokens(text: string, ctx: TokenContext = {}): LengthTo
     });
 }
 
+/**
+ * The values in a text the user boxed. The usual rules come first; when they
+ * find nothing (a voltage, an angle, a size code, a unit the tool does not
+ * know), every number counts, with the word written after it as its unit:
+ * the user pointed at it, so it is converted.
+ */
+export function manualTokens(text: string, customSuffix?: string): LengthToken[] {
+  const toks = findLengthTokens(text, { isDimension: true, customSuffix });
+  if (toks.length) return toks;
+  const out: LengthToken[] = [];
+  const re = /(\d+(?:[.,]\d+)?|\.\d+)(\s?)([A-Za-z\u00b5\u00b0"'\u2033\u2032%]{1,6})?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const value = parseFloat(m[1].replace(',', '.'));
+    if (!Number.isFinite(value) || value === 0) continue;
+    const word = m[3] ?? '';
+    const unit = word ? knownUnit(word) : null;
+    out.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      value,
+      unit,
+      spaced: !!m[2] && !!word,
+      kind: kindFromPrefix(text.slice(0, m.index)),
+      ...(m[1].includes(',') ? { comma: true } : {}),
+      ...(word && !unit ? { suffix: word } : {}),
+    });
+    if (!word && m[2]) re.lastIndex -= m[2].length; // the space belongs to what follows
+  }
+  return out;
+}
+
 /** True when the text holds nothing but dimension values (it is then re-centred when it grows). */
 export function isStandaloneDimension(text: string, dims: { start: number; end: number }[]): boolean {
   if (!dims.length) return false;
@@ -333,21 +393,25 @@ export function detectDimensions(drawing: Drawing, opts: { customSuffix?: string
 }
 
 /** Text that replaces dimension `d` under `settings` (its own overrides applied). */
-export function replacementText(d: Dimension, fullText: string, s: ConversionSettings, defaultUnit: LengthUnit): string {
+export function replacementText(d0: Dimension, fullText: string, s0: ConversionSettings, defaultUnit: LengthUnit): string {
+  const s = settingsFor(d0, s0);
+  const d = effectiveToken(d0);
   const o = d.override ?? {};
   // the sign in front, when the user chose to add it (or keep it while it is replaced with the value)
   const sign = o.diameter === true ? (diameterSignBefore(fullText, d.start)?.sign ?? '\u00d8') : '';
   if (o.text !== undefined) return o.text.startsWith(sign.trim()) ? o.text : sign + o.text;
   let f;
   if (s.target === 'custom') {
-    const v = customValue(d, s.custom);
-    if (v === null) return fullText.slice(d.start, d.end); // not in the original unit: left as it is
+    // a value in a box the user drew counts as being in the original unit, whatever it says
+    const v = customValue(d, s.custom) ?? (d.manual ? d.value * (parseFactor(s.custom.factor) ?? NaN) : null);
+    if (v === null || !Number.isFinite(v)) return fullText.slice(d.start, d.end); // not in the original unit: left as it is
     f = formatCustom(v, s);
   } else f = formatLength(toMm(d.value, d.unit ?? defaultUnit), s);
   let out = sign + (d.comma ? f.number.replace('.', ',') : f.number);
   if (d.noLabel) return out;
   if (f.label) {
-    const sep = f.symbol ? '' : d.unit || d.suffix ? (d.spaced ? ' ' : '') : ' ';
+    // spaced like the drawing wrote it (a unit chosen in the list is not written there)
+    const sep = f.symbol ? '' : d0.unit || d0.suffix ? (d0.spaced ? ' ' : '') : ' ';
     out += sep + f.label;
   }
   // "8mmDia" -> "0.31 in Dia", but "6\"x45°" stays "152.4mmx45°"
@@ -372,8 +436,11 @@ export function customValue(d: LengthToken, c: CustomUnit): number | null {
 }
 
 /** Whether `d` can be converted with `s` (in custom mode: only values in the original unit). */
-export function canConvert(d: Dimension, s: ConversionSettings): boolean {
-  if (d.override?.text !== undefined) return true;
+export function canConvert(d0: Dimension, s: ConversionSettings): boolean {
+  if (d0.override?.text !== undefined) return true;
+  // a box the user drew takes precedence over the rules (only a custom factor must be a number)
+  if (d0.manual) return s.target !== 'custom' || parseFactor(s.custom.factor) !== null;
+  const d = effectiveToken(d0);
   // a value in a unit of the user's own ("12 u") only converts with the custom unit
   if (s.target !== 'custom') return d.suffix === undefined;
   return customValue(d, s.custom) !== null;

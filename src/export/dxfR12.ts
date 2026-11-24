@@ -178,7 +178,7 @@ function entity(ctx: Ctx, e: Entity, dimsByText: Map<string, Dimension[]>): void
       const dims = dimsByText.get(e.id);
       const lay = dims ? layoutText(e, dims) : null;
       // converted text: where the user moved it, at the size they chose
-      const sz = lay?.display.changed ? sized(e, movedPos(e, lay.pos)) : null;
+      const sz = lay?.display.changed ? sized(e, movedPos(e, lay.pos), lay) : null;
       text(ctx, sz ? sz.t : e, lay ? lay.text : e.text, sz ? sz.pos : lay ? lay.pos : e.pos, lay ? lay.align : e.align);
       break;
     }

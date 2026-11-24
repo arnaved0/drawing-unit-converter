@@ -5,7 +5,7 @@
 // white patch. Every number in it counts as a length, since the user pointed
 // at it, except angles.
 
-import { findLengthTokens, type Dimension } from './dimensions';
+import { manualTokens, type Dimension } from './dimensions';
 import { textCorners, pointInPoly } from './geom';
 import { newId, type Box, type Drawing, type Pt, type TextEntity } from './model';
 
@@ -168,9 +168,9 @@ let counter = 0;
  * original suffix: values written with it count too ("12V", "45°").
  */
 export function dimensionsOf(t: TextEntity, customSuffix?: string): Dimension[] {
-  return findLengthTokens(t.text, { isDimension: true, customSuffix }).map((tok) => {
+  return manualTokens(t.text, customSuffix).map((tok) => {
     counter += 1;
-    return { ...tok, id: `m${counter}`, textId: t.id, original: t.text.slice(tok.start, tok.end) };
+    return { ...tok, manual: true, id: `m${counter}`, textId: t.id, original: t.text.slice(tok.start, tok.end) };
   });
 }
 

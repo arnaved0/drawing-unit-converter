@@ -50,8 +50,19 @@ export function hexToAci(hex: string): number {
   return best;
 }
 
-/** Colour to show on the white preview: AutoCAD "white" (ACI 7) is drawn black. */
-export function displayColor(hex: string): string {
+/**
+ * Colour to show on the white preview. In a CAD file, "white" (ACI 7) means
+ * "black on paper" and is drawn black. A PDF or an image is already paper:
+ * its colours are shown as they are (`literal`), so a white patch stays white.
+ */
+export function displayColor(hex: string, literal = false): string {
+  if (literal) return hex;
   const [r, g, b] = rgb(hex);
   return r > 235 && g > 235 && b > 235 ? '#000000' : hex;
+}
+
+/** True for white (or nearly): paper colour in a PDF. */
+export function isWhite(hex: string): boolean {
+  const [r, g, b] = rgb(hex);
+  return r > 240 && g > 240 && b > 240;
 }

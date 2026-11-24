@@ -55,11 +55,18 @@ describe('adding a box by hand', () => {
     expect(layer.overlays).toContain(`points="${corners}"`);
   });
 
-  it('counts a bare number as a length inside a box, but not an angle', () => {
+  it('counts a bare number as a length inside a box; the box goes before the rules', () => {
     const box = { minX: 0, maxX: 30, minY: 0, maxY: 5 };
     const d = { entities: [], blocks: {} } as never;
     expect(addBoxedText(d, [], box, textFromBox('C-Z 11.2', box)).dims.map((x) => x.original)).toEqual(['11.2']);
-    expect(addBoxedText(d, [], box, textFromBox('86.0°', box)).dims).toEqual([]);
+    // an angle is left alone on the page, but the user boxed it: it converts, its unit marked as unknown
+    const angle = addBoxedText(d, [], box, textFromBox('86.0°', box)).dims;
+    expect(angle.map((x) => [x.original, x.suffix, x.manual])).toEqual([['86.0°', '°', true]]);
+    // a unit written in the box is used, whatever the original unit is
+    const inch = addBoxedText(d, [], box, textFromBox('0.98in', box)).dims;
+    expect(inch.map((x) => x.unit)).toEqual(['in']);
+    // no number at all: nothing to convert
+    expect(addBoxedText(d, [], box, textFromBox('Split heater', box)).dims).toEqual([]);
   });
 
   it('replaces a value that was read wrongly inside the box', async () => {
@@ -173,3 +180,27 @@ describe('outlines traced with the right button', () => {
 function polyCentreOf(p: { x: number; y: number }[]) {
   return { x: p.reduce((s, q) => s + q.x, 0) / p.length, y: p.reduce((s, q) => s + q.y, 0) / p.length };
 }
+
+describe('a box the user drew takes precedence', () => {
+  it('converts what the usual rules leave alone, in the unit written in it', async () => {
+    const { convertDimension, canConvert } = await import('../src/dimensions');
+    const { DEFAULT_SETTINGS } = await import('../src/units');
+    const box = { minX: 0, maxX: 30, minY: 0, maxY: 5 };
+    const d = { entities: [], blocks: {} } as never;
+    const IN = { ...DEFAULT_SETTINGS, target: 'in' as const, decimals: 2 };
+    const MM = { ...DEFAULT_SETTINGS, target: 'mm' as const, decimals: 1 };
+    // "0.98in" on a millimetre drawing: inches, as the box says
+    const [inch] = addBoxedText(d, [], box, textFromBox('0.98in', box)).dims;
+    convertDimension(inch, '0.98in', MM, 'mm');
+    expect(inch.converted?.text).toBe('24.9mm');
+    // a value with a unit the tool does not know: read as the original unit
+    const [odd] = addBoxedText(d, [], box, textFromBox('12 u', box)).dims;
+    expect(canConvert(odd, IN)).toBe(true);
+    convertDimension(odd, '12 u', IN, 'mm');
+    expect(odd.converted?.text).toBe('0.47 in');
+    // and the unit chosen for it in the list wins over everything
+    odd.override = { unit: 'in', decimals: 1 };
+    convertDimension(odd, '12 u', MM, 'mm');
+    expect(odd.converted?.text).toBe('304.8 mm');
+  });
+});
