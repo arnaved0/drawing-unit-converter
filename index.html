@@ -168,32 +168,27 @@
     </main>
     <dialog id="box-dialog" class="dialog box-dialog">
       <form method="dialog">
-        <h3>Add a box</h3>
-        <p id="box-read" class="hint"></p>
-        <label class="field"><span>Text in the box</span>
+        <h3 id="box-title">Text in the box</h3>
+        <div id="box-convert">
+          <p id="box-read" class="hint"></p>
           <span class="input-sym">
-            <input id="box-text" type="text" autocomplete="off" spellcheck="false" />
+            <textarea id="box-text" rows="1" autocomplete="off" spellcheck="false" aria-label="Text in the box"></textarea>
             <button type="button" id="box-dia" class="btn small" title="Insert the diameter sign" aria-label="Insert the diameter sign Ø">Ø</button>
-            <button type="button" id="box-translate" class="btn small" title="Translate the text in the box into another language">Translate…</button>
           </span>
-        </label>
-        <p class="hint" id="box-hint-units">Include the unit if the drawing shows one, for example <code>88.9</code>, <code>R 25.4mm</code>, <code>Ø12</code> or <code>Dia 22.3mm</code>. <b>Add box</b> converts the values in it.</p>
-        <section id="tr-panel" class="tr-panel" hidden>
-          <label class="field"><span>Text to translate</span><textarea id="tr-src" rows="2" spellcheck="false"></textarea></label>
-          <div class="tr-langs">
-            <label class="field"><span>From</span><select id="tr-from"></select></label>
-            <span class="tr-arrow" aria-hidden="true">→</span>
-            <label class="field"><span>To</span><select id="tr-to"></select></label>
-            <button type="button" id="tr-go" class="btn primary">Translate</button>
-          </div>
-          <label class="check"><input type="checkbox" id="tr-online" /> If this browser cannot translate on this device, send the text to an online translator (Google Translate). Only the text in this box is sent.</label>
-          <label class="field"><span>Translation</span><textarea id="tr-out" rows="2" spellcheck="false" placeholder="Press Translate, or type the translation"></textarea></label>
+          <p id="box-note" class="hint"></p>
+        </div>
+        <div id="box-tr" class="tr-panel" hidden>
+          <p id="tr-source" class="tr-source"></p>
+          <label class="field"><span>Translate into</span><select id="tr-to"></select></label>
+          <textarea id="tr-out" rows="3" spellcheck="false" aria-label="Translation" placeholder="Translating…"></textarea>
           <p class="hint" id="tr-status" aria-live="polite"></p>
-        </section>
+        </div>
         <div class="row">
           <button value="cancel" class="btn" formnovalidate>Cancel</button>
-          <button value="translation" id="box-use-tr" class="btn" hidden>Write translation</button>
-          <button value="ok" class="btn primary" id="box-ok">Add box</button>
+          <button type="button" id="box-back" class="btn" hidden>Back</button>
+          <button type="button" id="box-translate" class="btn">Translate</button>
+          <button value="ok" id="box-ok" class="btn primary">Convert values</button>
+          <button value="translation" id="box-use-tr" class="btn primary" hidden>Write translation</button>
         </div>
       </form>
     </dialog>

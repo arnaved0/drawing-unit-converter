@@ -1,6 +1,6 @@
 # Drawing Unit Converter: quick guide
 
-Open the tool at https://arnaved0.github.io/drawing-unit-converter/. Files stay in your browser and are never uploaded. (The one exception is a translation you ask for: if your browser cannot translate on your computer and you allow it, the text of that one box is sent to Google Translate.)
+Open the tool at https://arnaved0.github.io/drawing-unit-converter/. Files stay in your browser and are never uploaded. (The one exception is **Translate** in a box: the text of that box is sent to Google Translate.)
 
 ## 1. Open a drawing
 Click **Open drawing…** or drop a **PDF, DXF, DWG, PNG or JPEG** file on the page (WebP, BMP and GIF pictures work too).
@@ -28,10 +28,9 @@ Values like `Ø60`, `R 25.4`, `3 3/8"`, `5'-6"` and `2X Ø12 THRU` keep their pr
 ## 4. Fix what was missed or misread
 Use the **Boxes** buttons:
 
-- **+ Add box**: drag a rectangle around a value the tool missed. For an angled or awkward spot, hold the **right** mouse button and trace any shape around it. The text inside is read for you to check (from the file's own text, or with OCR, in any script including Chinese and Japanese), and the **Ø** button inserts a diameter sign.
-  - A box takes precedence over the rules: any number in it is converted, and a unit written in it (for example `0.98in` on a mm drawing) is used instead of the **Original unit**. A unit the tool does not know is read as the Original unit; change that under **Written in** (step 5).
-  - **Add box** converts the values in the box. If it holds no number, you are told so.
-  - **Translate…** translates the text in the box into another language. Your browser translates it on your computer where it can (Chrome downloads a language pack once); otherwise, if you tick the box, only that text is sent to Google Translate. Check or edit the translation, then press **Write translation** to write it over the box. It is listed with the dimensions and can be moved, resized, turned or undone.
+- **+ Add box**: drag a rectangle around a value or a piece of text. For an angled or awkward spot, hold the **right** mouse button and trace any shape around it. The text inside is read for you (in any script, Chinese and Japanese included) and you can correct it; the **Ø** button inserts a diameter sign. Then:
+  - **Convert values** converts the numbers in the box. A box takes precedence over the rules: every number in it is converted, and a unit written in it (for example `0.98in` on a mm drawing) is used instead of the **Original unit**. A unit the tool does not know is read as the Original unit. This button only shows when the box holds a number.
+  - **Translate** translates the text into the language you pick (Google Translate, or your browser's own translator when offline). Edit it if you like, then **Write translation** writes it over the box. It is listed with the dimensions and can be moved, resized, turned or undone.
 - **− Remove box**: click a box to delete it. The **×** in the list does the same.
 
 ## 5. Adjust one dimension
@@ -41,7 +40,6 @@ Click **⌄** on a row in the Dimensions list:
 - **Text size**: use **−** and **+** to change the size.
 - **Rotation**: **⟲ / ⟳** turn the converted text by 90°, **− / +** by 15°, or type an angle.
 - **Decimal places** (or **Round to** for fractions): for this value only.
-- **Written in**: the unit this value is in, whatever the drawing or the Original unit says.
 - **Diameter sign (Ø)**: add the sign or take it out.
 - **Reset** undoes these changes.
 

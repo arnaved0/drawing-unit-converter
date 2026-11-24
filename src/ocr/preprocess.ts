@@ -9,6 +9,7 @@ import { fixDiameters } from './diameter';
 import { chooseFits, measureLine, plausible, scoreFaces, snappedBox, type Fit, type LineBox, type Measured, type RenderText, type RGBA } from '../fonts/match';
 import type { TextStyleHint } from '../importers/pdf';
 import type { Face } from '../fonts/faces';
+import { usableText } from '../fonts/script';
 
 /** The parts of a pdf.js page this module needs. */
 interface PdfPage {
@@ -112,6 +113,8 @@ export async function existingTextBoxes(page: PdfPage, vp: { transform: number[]
   const out: number[][] = [];
   for (const it of tc.items) {
     if (typeof it.str !== 'string' || !it.str.trim()) continue;
+    // garbled text (a font with no character codes) is read from the page instead
+    if (!usableText(it.str)) continue;
     // item.transform: (a, b) runs along the baseline, (c, d) is the em "up" vector, (e, f) the origin
     const [a, b, c, d, e, f] = it.transform as number[];
     const len = Math.hypot(a, b) || 1;

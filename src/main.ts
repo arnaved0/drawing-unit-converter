@@ -1,7 +1,7 @@
 import './styles.css';
 import * as pdfjs from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, replacementText, settingsFor, type Dimension } from './dimensions';
+import { canConvert, convertDimension, detectDimensions, diameterSignBefore, findLengthTokens, hasDiameterSign, manualTokens, replacementText, settingsFor, type Dimension } from './dimensions';
 import { addBoxedText, boxPoly, outlineFrame, polyArea, textFromBox, textFromPlacement, type Placement } from './boxes';
 import { apply, invert, pointInPoly, textCorners, type Mat } from './geom';
 import { measureInk, pageToImage, renderPageImage } from './ink';
@@ -20,8 +20,8 @@ import { advance, fontBytes, getFace, loadAllFaces, registerFaces, setFontBase, 
 import { canvasRenderer } from './fonts/match';
 import { fixDiameters } from './ocr/diameter';
 import type { FoundLine, OcrRequest, OcrResponse } from './ocr/worker';
-import { LANGUAGES, languageName, NeedsOnline, translate } from './translate';
-import { webScriptFont } from './fonts/script';
+import { LANGUAGES, languageName, translate } from './translate';
+import { usableText, webScriptFont } from './fonts/script';
 import { DEFAULT_SETTINGS, formatCustom, formatLength, parseFactor, settingsKey, TARGET_LABELS, type ConversionSettings, type TargetFormat } from './units';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -518,7 +518,6 @@ function editPanel(d: Dimension, t: TextEntity | undefined): string {
   const frac = eff.target === 'in-frac' || eff.target === 'ft-in';
   const dec = eff.decimals;
   const den = eff.denominator;
-  const foundUnit = d.unit ? `As written (${d.unit})` : d.suffix !== undefined ? `As written (${d.suffix.trim()})` : `Original unit (${state.sourceUnit})`;
   return (
     `<div class="dim-edit">` +
     `<label class="e-field e-wide"><span>${d.translated ? 'Translation' : 'Converted text'}</span><input class="e-text" type="text" spellcheck="false" autocomplete="off"/></label>` +
@@ -542,19 +541,13 @@ function editPanel(d: Dimension, t: TextEntity | undefined): string {
         `<button type="button" class="btn small e-dec-up" title="More" aria-label="More decimal places"${dec >= 6 ? ' disabled' : ''}>+</button></div>`) +
     (d.translated
       ? ''
-      : `<label class="e-field e-wide e-inline"><span>Written in</span><select class="e-unit">` +
-        `<option value="">${esc(foundUnit)}</option>` +
-        (['mm', 'cm', 'm', 'in', 'ft'] as LengthUnit[]).map((u) => `<option value="${u}"${o.unit === u ? ' selected' : ''}>${UNIT_NAMES[u]}</option>`).join('') +
-        `</select></label>` +
-        `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>`) +
+      : `<label class="e-check e-wide"><input class="e-dia" type="checkbox"${dia ? ' checked' : ''}/> Diameter sign (Ø)</label>`) +
     `<div class="e-actions">${t?.offset ? '<button class="btn small e-moveback">Move text back</button>' : ''}` +
     `${d.override || size !== 1 || t?.turn ? '<button class="btn small e-reset">Reset</button>' : ''}</div>` +
     `</div>`
   );
 }
 
-const UNIT_NAMES: Record<LengthUnit, string> = { mm: 'Millimetres (mm)', cm: 'Centimetres (cm)', m: 'Metres (m)', in: 'Inches (in)', ft: 'Feet (ft)' };
-const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /** Turns the converted text of dimension `id` to `deg` degrees (or by `step`), and converts it if it is not yet. */
 function setTurn(id: string, deg: number | null, step = 0): void {
@@ -630,12 +623,6 @@ $('dim-list').addEventListener('change', (ev) => {
     editDimension(id, (o) => {
       if (n === (state.used.get(d.id) ?? state.settings).denominator) delete o.denominator;
       else o.denominator = n;
-    });
-  } else if (el.classList.contains('e-unit')) {
-    const u = el.value as LengthUnit | '';
-    editDimension(id, (o) => {
-      if (u) o.unit = u;
-      else delete o.unit;
     });
   } else if (el.classList.contains('e-dia')) {
     const on = (el as HTMLInputElement).checked;
@@ -1271,14 +1258,21 @@ async function readBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxR
   } catch (err) {
     console.warn(err);
   }
-  if (!ocr) return fromFile;
+  if (!ocr) return fromFile && usableText(fromFile.allText) ? fromFile : fromFile && { ...fromFile, text: '', allText: '' };
   if (!fromFile) return ocr;
   // Real text is exact; the OCR reading gives the look of the letters. A text
   // layer (OCR) was read at page scale: the box reading is closer.
   const real = fileTextIn(d, outline ?? poly).filter((t) => !t.ocr);
   if (!real.length) return ocr;
+  // The file's own text, unless it is unusable: Chinese and Japanese PDFs often
+  // store their characters with private or missing codes, which come out blank
+  // or garbled. What the letters on the page read as is then the text.
+  if (!usableText(fromFile.allText) || (CJK.test(ocr.allText) && !CJK.test(fromFile.allText))) return ocr;
   return { ...ocr, text: fromFile.text, allText: fromFile.allText, placement: fromFile.placement };
 }
+
+/** Chinese, Japanese and Korean characters. */
+const CJK = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]/;
 
 /** The text in a box on a PDF page, read with OCR; null when nothing could be read. */
 async function ocrBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRead | null> {
@@ -1373,44 +1367,77 @@ async function ocrBoxText(d: Drawing, poly: Pt[], outline?: Pt[]): Promise<BoxRe
 
 type BoxAnswer = { action: 'convert'; text: string } | { action: 'translate'; source: string; translation: string; lang: string };
 
-const TR_ONLINE_KEY = 'duc.translate.online.v1';
 const TR_TO_KEY = 'duc.translate.to.v1';
 {
-  const opts = LANGUAGES.map(([c, n]) => `<option value="${c}">${n}</option>`).join('');
-  $('tr-from').innerHTML = `<option value="">Detect automatically</option>${opts}`;
-  $('tr-to').innerHTML = opts;
+  $('tr-to').innerHTML = LANGUAGES.map(([c, n]) => `<option value="${c}">${n}</option>`).join('');
   const nav = (navigator.language || 'en').toLowerCase();
   const pref = localStorage.getItem(TR_TO_KEY) ?? (LANGUAGES.find(([c]) => c.toLowerCase() === nav) ?? LANGUAGES.find(([c]) => nav.startsWith(c.split('-')[0])) ?? ['en'])[0];
   $<HTMLSelectElement>('tr-to').value = pref;
-  $<HTMLInputElement>('tr-online').checked = localStorage.getItem(TR_ONLINE_KEY) === 'on';
-  $('tr-online').addEventListener('change', () => localStorage.setItem(TR_ONLINE_KEY, $<HTMLInputElement>('tr-online').checked ? 'on' : 'off'));
-  $('tr-to').addEventListener('change', () => localStorage.setItem(TR_TO_KEY, $<HTMLSelectElement>('tr-to').value));
+}
+
+/** The lines of `text` that hold a value to convert, on one line (all of it when none do). */
+function valueLines(text: string): string {
+  const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const withValues = lines.filter((l) => manualTokens(l, customSuffix()).length);
+  return (withValues.length ? withValues : lines).join(' ');
 }
 
 /**
- * Shows what was read in a box. "Add box" converts the values in it;
- * "Translate…" opens a translation of the text, which can be written on the
- * drawing instead. Resolves null on cancel.
+ * Shows what was read in a box. "Convert values" converts the values in it
+ * (and is only offered when there are some); "Translate" shows a translation,
+ * which "Write translation" writes over the box. Resolves null on cancel.
  */
 function askBoxText(read: BoxRead | null): Promise<BoxAnswer | null> {
   const dlg = $<HTMLDialogElement>('box-dialog');
-  const input = $<HTMLInputElement>('box-text');
-  const src = $<HTMLTextAreaElement>('tr-src');
+  const input = $<HTMLTextAreaElement>('box-text');
   const out = $<HTMLTextAreaElement>('tr-out');
   const status = $('tr-status');
-  const panel = $('tr-panel');
+  const note = $('box-note');
+  const ok = $<HTMLButtonElement>('box-ok');
+  const tr = $<HTMLButtonElement>('box-translate');
   const useTr = $<HTMLButtonElement>('box-use-tr');
-  $('box-read').textContent =
-    read === null ? 'Nothing could be read in the box. Type what it says.' : 'Read from the drawing. Correct it if needed.';
-  input.value = read?.text.replace(/\s*\n\s*/g, ' ') ?? '';
-  src.value = read?.allText ?? read?.text ?? '';
+  const back = $<HTMLButtonElement>('box-back');
+  $('box-read').textContent = read === null ? 'Nothing could be read here. Type what the box says.' : 'Read from the drawing. Correct it if needed.';
+  input.value = read?.allText ?? read?.text ?? '';
+  const fit = () => {
+    input.rows = Math.min(5, Math.max(1, input.value.split('\n').length));
+  };
+  fit();
   out.value = '';
   status.textContent = '';
-  panel.hidden = true;
-  useTr.hidden = true;
-  // text in another script: offer the translation straight away
-  const foreign = /[^\u0000-\u024f\u2000-\u22ff\u00b0\u00d8\u00f8\u2300\u2205]/.test(src.value);
-  $('box-translate').classList.toggle('primary', foreign);
+
+  /** Convert or translate, depending on what the text holds. */
+  const refresh = () => {
+    fit();
+    const text = input.value.trim();
+    const values = text ? manualTokens(text.replace(/\s*\n\s*/g, ' '), customSuffix()) : [];
+    ok.disabled = !values.length;
+    // nothing to convert: only the translation is offered
+    ok.hidden = !values.length;
+    tr.disabled = !text;
+    note.classList.toggle('warn', !!text && !values.length);
+    note.textContent = !text
+      ? ''
+      : values.length
+        ? `Converts ${values.map((v) => `"${text.replace(/\s*\n\s*/g, ' ').slice(v.start, v.end)}"`).join(', ')}.`
+        : 'There are no values to convert in this text. You can translate it.';
+    // text with nothing to convert: translating is what is left to do
+    ok.classList.toggle('primary', values.length > 0);
+    tr.classList.toggle('primary', !values.length && !!text);
+  };
+  const showTranslate = (on: boolean) => {
+    $('box-convert').hidden = on;
+    $('box-tr').hidden = !on;
+    $('box-title').textContent = on ? 'Translate the text' : 'Text in the box';
+    ok.hidden = on;
+    tr.hidden = on;
+    back.hidden = !on;
+    useTr.hidden = !on;
+    useTr.disabled = !out.value.trim();
+  };
+  showTranslate(false);
+  refresh();
+  input.oninput = refresh;
   // Ø is not on most keyboards
   $('box-dia').onclick = () => {
     const a = input.selectionStart ?? input.value.length;
@@ -1418,44 +1445,50 @@ function askBoxText(read: BoxRead | null): Promise<BoxAnswer | null> {
     input.value = input.value.slice(0, a) + '\u00d8' + input.value.slice(b);
     input.focus();
     input.setSelectionRange(a + 1, a + 1);
+    refresh();
   };
   let detected = '';
+  let runId = 0;
   const run = async () => {
-    const text = src.value.trim();
-    if (!text) {
-      status.textContent = 'There is no text to translate. Type it above.';
-      return;
-    }
+    const text = input.value.trim();
+    $('tr-source').textContent = text;
+    if (!text) return;
+    const id = ++runId;
     const to = $<HTMLSelectElement>('tr-to').value;
+    out.value = '';
+    useTr.disabled = true;
     status.textContent = 'Translating…';
-    $<HTMLButtonElement>('tr-go').disabled = true;
     try {
-      const res = await translate(text, $<HTMLSelectElement>('tr-from').value, to, $<HTMLInputElement>('tr-online').checked, (m) => (status.textContent = m));
+      const res = await translate(text, '', to, (m) => id === runId && (status.textContent = m));
+      if (id !== runId) return;
       out.value = res.text;
       detected = res.from;
-      status.textContent = `${res.from ? `From ${languageName(res.from)}. ` : ''}Translated by ${res.engine}. Check it, then press "Write translation".`;
-      useTr.hidden = false;
+      status.textContent = `${res.from ? `From ${languageName(res.from)}, by` : 'By'} ${res.engine}. You can edit it.`;
     } catch (err) {
-      status.textContent =
-        err instanceof NeedsOnline
-          ? `${err.message} Tick the box above to use an online translator, or type the translation yourself.`
-          : (err as Error).message;
-      useTr.hidden = !out.value.trim();
-    } finally {
-      $<HTMLButtonElement>('tr-go').disabled = false;
+      if (id !== runId) return;
+      status.textContent = (err as Error).message;
     }
+    useTr.disabled = !out.value.trim();
   };
-  $('box-translate').onclick = () => {
-    panel.hidden = false;
+  tr.onclick = () => {
+    showTranslate(true);
     void run();
   };
-  $('tr-go').onclick = () => void run();
-  out.oninput = () => (useTr.hidden = !out.value.trim());
-  // Enter means "Add box" (the form's first button is Cancel)
+  back.onclick = () => {
+    runId++;
+    showTranslate(false);
+    refresh();
+  };
+  $<HTMLSelectElement>('tr-to').onchange = () => {
+    localStorage.setItem(TR_TO_KEY, $<HTMLSelectElement>('tr-to').value);
+    void run();
+  };
+  out.oninput = () => (useTr.disabled = !out.value.trim());
+  // Enter converts (Shift+Enter starts a new line)
   input.onkeydown = (ev) => {
-    if (ev.key === 'Enter') {
+    if (ev.key === 'Enter' && !ev.shiftKey) {
       ev.preventDefault();
-      dlg.close('ok');
+      if (!ok.disabled) dlg.close('ok');
     }
   };
   dlg.returnValue = '';
@@ -1464,9 +1497,11 @@ function askBoxText(read: BoxRead | null): Promise<BoxAnswer | null> {
   input.select();
   return new Promise((resolve) => {
     dlg.onclose = () => {
+      runId++;
+      const text = input.value.trim();
       if (dlg.returnValue === 'translation' && out.value.trim()) {
-        resolve({ action: 'translate', source: src.value.trim() || input.value.trim(), translation: out.value.trim(), lang: $<HTMLSelectElement>('tr-to').value || detected });
-      } else if (dlg.returnValue === 'ok' && input.value.trim()) resolve({ action: 'convert', text: input.value.trim() });
+        resolve({ action: 'translate', source: text, translation: out.value.trim(), lang: $<HTMLSelectElement>('tr-to').value || detected });
+      } else if (dlg.returnValue === 'ok' && text) resolve({ action: 'convert', text: valueLines(text) });
       else resolve(null);
     };
   });
@@ -1529,7 +1564,7 @@ async function placeBox(poly: Pt[], frame: Pt[] = poly): Promise<void> {
   // a box goes before the rules: say how a value in an unknown unit was taken
   const odd = added.filter((x) => x.suffix !== undefined && state.settings.target !== 'custom');
   const oddNote = odd.length
-    ? ` "${odd[0].original}" has a unit the converter does not know; it is read as ${state.sourceUnit}. Change that under ⌄ "Written in".`
+    ? ` "${odd[0].original}" has a unit the converter does not know, so it is read as ${state.sourceUnit} (the Original unit).`
     : '';
   const replaced = edit.replaced.length ? ` It replaces ${edit.replaced.length} box${edit.replaced.length === 1 ? '' : 'es'} that ${edit.replaced.length === 1 ? 'was' : 'were'} there.` : '';
   toast(`Added "${added.map((x) => x.original).join('", "')}".${replaced}${oddNote}`, false, oddNote ? 9000 : 6000, { label: 'Undo', run: undo });

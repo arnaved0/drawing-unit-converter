@@ -1,9 +1,9 @@
 // Translation of text the user boxed.
 //
-// First choice: the browser's own on-device translator (Chrome's Translator
-// API), so nothing leaves the computer. Where the browser has none, and only
-// when the user allows it, the text is sent to an online translator (Google
-// Translate, then MyMemory). Only the boxed text is sent, never the drawing.
+// The most accurate translator that answers is used: Google Translate first,
+// then MyMemory, then the browser's own on-device translator (Chrome's
+// Translator API, which also works offline). Only the boxed text is sent,
+// never the drawing.
 
 import { guessLanguage } from './fonts/script';
 
@@ -105,42 +105,29 @@ async function myMemory(text: string, from: string, to: string): Promise<string>
   return String(out);
 }
 
-export class NeedsOnline extends Error {}
-
 /** `p`, or null after `ms` (a browser API that never answers, a model that never loads). */
 function within<T>(p: Promise<T>, ms: number): Promise<T | null> {
   return Promise.race([p, new Promise<null>((r) => setTimeout(() => r(null), ms))]);
 }
 
-/**
- * Translates `text` into `to`. `from` is the source language or '' to detect
- * it. Online translators are used only when `allowOnline` is set.
- */
-export async function translate(text: string, from: string, to: string, allowOnline: boolean, onStatus?: (msg: string) => void): Promise<Translation> {
+/** Translates `text` into `to`; `from` is the source language, or '' to detect it. */
+export async function translate(text: string, from: string, to: string, onStatus?: (msg: string) => void): Promise<Translation> {
   const src = from || (await detectLanguage(text)) || '';
   if (src && base(src) === base(to)) return { text, engine: 'nothing to do (same language)', from: src };
-  if (src) {
-    const local = await onDevice(text, src, to, onStatus);
-    if (local) return { text: local, engine: 'your browser, on this device', from: src };
-  }
-  if (!allowOnline) {
-    throw new NeedsOnline(
-      src
-        ? `This browser cannot translate ${languageName(src)} to ${languageName(to)} on this device.`
-        : 'This browser cannot translate on this device.',
-    );
-  }
   const errors: string[] = [];
-  onStatus?.('Translating online…');
+  onStatus?.('Translating…');
   try {
-    return { text: await google(text, src, to), engine: 'Google Translate (online)', from: src };
+    return { text: await within(google(text, src, to), 15000).then((t) => t ?? Promise.reject(new Error('Google Translate did not answer'))), engine: 'Google Translate', from: src };
   } catch (err) {
     errors.push((err as Error).message);
   }
   try {
-    return { text: await myMemory(text, src, to), engine: 'MyMemory (online)', from: src };
+    if (src) return { text: await within(myMemory(text, src, to), 15000).then((t) => t ?? Promise.reject(new Error('MyMemory did not answer'))), engine: 'MyMemory', from: src };
   } catch (err) {
     errors.push((err as Error).message);
   }
-  throw new Error(`The text could not be translated (${errors.join('; ')}). Check the internet connection, or type the translation yourself.`);
+  // offline: the browser's own translator
+  const local = src ? await onDevice(text, src, to, onStatus) : null;
+  if (local) return { text: local, engine: 'your browser (on this device)', from: src };
+  throw new Error(`The text could not be translated (${errors.join('; ') || 'no translator answered'}). Check the internet connection, or type the translation yourself.`);
 }

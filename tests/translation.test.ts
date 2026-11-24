@@ -77,3 +77,14 @@ describe('lines in other scripts', () => {
     expect(latinRuns('分体式加热管')).toEqual([]);
   });
 });
+
+describe('text a PDF stores', () => {
+  it('is trusted only when it has real character codes', async () => {
+    const { usableText } = await import('../src/fonts/script');
+    expect(usableText('长度 300mm')).toBe(true);
+    expect(usableText('Dia 22.3mm')).toBe(true);
+    expect(usableText(' 300mm')).toBe(false); // private-use codes: a font without a character map
+    expect(usableText('��')).toBe(false);
+    expect(usableText('   ')).toBe(false);
+  });
+});

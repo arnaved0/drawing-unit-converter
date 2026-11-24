@@ -8,6 +8,7 @@ import { compoundFill, subpathToEntity, type RawSeg, type RawSubpath } from '../
 import { guessDimensionUnit } from '../dimensions';
 import { apply, applyVec, drawingBounds, entityBox, flattenSegs, IDENTITY, matScale, mul, pointInPoly, textCorners, type Mat } from '../geom';
 import { isWhite } from '../aci';
+import { usableText } from '../fonts/script';
 import { countEntities, emptyStats, newId, TEXT_OUTLINES, type Drawing, type Entity, type Pt, type Style, type TextEntity } from '../model';
 import { advance, faceForFontName, getFace, type FaceId } from '../fonts/faces';
 
@@ -463,11 +464,18 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
     // text
     const tc = await page.getTextContent({ includeMarkedContent: false });
     let hiddenText = false;
+    let garbled = 0;
     const raw: RawText[] = [];
     let gp = 0;
     for (const item of tc.items as any[]) {
       // Whitespace-only runs are dropped; mergeRuns re-inserts spaces from the gaps.
       if (typeof item.str !== 'string' || !item.str.trim()) continue;
+      // Characters a font gives no codes for (private-use, replacement): the text
+      // is unreadable as stored. Scan & OCR reads those letters from the page.
+      if (!usableText(item.str)) {
+        garbled++;
+        continue;
+      }
       // colour and visibility: walk the glyph stream in parallel
       let color = '#000000';
       let invisible = false;
@@ -559,6 +567,7 @@ export async function importPdf(pdfjs: PdfJs, bytes: Uint8Array, name: string, o
       warnings.push('No text found on this page. Turn on "Read text with OCR first" to read text that is drawn as outlines or scanned.');
     }
     if (pendingImages.length && !opts.encodeImage) warnings.push('Images were found but not decoded.');
+    if (garbled) warnings.push(`${garbled} piece${garbled === 1 ? '' : 's'} of text in the PDF had no readable character codes (common with Chinese and Japanese fonts); Scan & OCR reads ${garbled === 1 ? 'it' : 'them'} from the page.`);
     if (hiddenText) warnings.push('Some text is covered by white patches (for example values replaced by an earlier conversion) and was left out.');
 
     return {

@@ -140,3 +140,16 @@ export function webScriptFont(s: Script): Promise<ShapingFont | null> {
   }
   return p;
 }
+
+/**
+ * Text a PDF holds that can be trusted: not empty, and with no characters in
+ * the private-use area, replacement characters or control codes. Those are
+ * signs of a font that does not say which characters its letters are (common
+ * in Chinese and Japanese CAD output): the text then shows blank or garbled,
+ * and what the letters on the page read as is used instead.
+ */
+export function usableText(s: string): boolean {
+  const chars = [...s].filter((c) => /\S/.test(c));
+  if (!chars.length) return false;
+  return !chars.some((c) => /[\ue000-\uf8ff\ufffd\u0000-\u001f\u007f-\u009f]/.test(c) || c.codePointAt(0)! >= 0xf0000);
+}

@@ -199,9 +199,16 @@ text.t { pointer-events: none; }
 .box-dialog { width: min(520px, 94vw); }
 .dialog textarea { font: inherit; font-size: 15px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; resize: vertical; width: 100%; box-sizing: border-box; }
 .tr-panel { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
-.tr-langs { display: flex; align-items: flex-end; gap: 8px; }
-.tr-langs .field { flex: 1; margin: 0; min-width: 0; }
-.tr-langs select { width: 100%; }
-.tr-arrow { padding-bottom: 8px; color: var(--muted); }
-.tr-panel .check { font-size: 12px; color: var(--muted); align-items: flex-start; }
+.tr-panel { border-top: none; margin-top: 0; padding-top: 0; }
+.tr-panel .field { margin: 0; }
+.tr-panel select { width: 100%; }
+.tr-source { margin: 0; padding: 8px 10px; background: #f4f6f8; border-radius: 6px; font-size: 14px; white-space: pre-wrap; max-height: 7em; overflow: auto; }
+.box-dialog .input-sym textarea { flex: 1; min-width: 0; resize: vertical; }
+.box-dialog .input-sym { align-items: flex-start; }
+.box-dialog #box-note.warn { color: #8a5a00; }
 .dim-list li.translated .orig::after { content: ' (translation)'; color: var(--muted); font-size: 11px; }
+
+/* controls over the drawing: above the SVG (z-index 1) and the page picture (0) */
+.zoom, .pager { z-index: 2; }
+.busy { z-index: 3; }
+.toast { z-index: 4; }
