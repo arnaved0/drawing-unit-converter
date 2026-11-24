@@ -4,7 +4,7 @@ Converts the dimensions on engineering drawings to other units (for example mill
 
 **Use it here: https://arnaved0.github.io/drawing-unit-converter/**
 
-It works with **PDF, DWG, DXF, PNG and JPEG** files, runs in your browser, and does not upload your files.
+
 
 ## Quick start
 1. Click **Open drawing…** and choose your file.
